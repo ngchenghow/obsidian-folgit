@@ -106,6 +106,24 @@ export default class FolgitPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "ignore-media-in-repo",
+      name: "Ignore media folder in a repo's .gitignore",
+      callback: () =>
+        this.pickRepoFolder("Select repo folder to update .gitignore", async (f) => {
+          if (!this.settings.mediaFolderPath.trim()) {
+            new Notice("Folgit: set the media folder path in settings first.");
+            return;
+          }
+          const added = await this.ensureMediaIgnored(f);
+          new Notice(
+            added
+              ? `Added media folder to '${f.path}/.gitignore'.`
+              : `No change — media folder already ignored or not inside '${f.path}'.`
+          );
+        }),
+    });
+
+    this.addCommand({
       id: "upload-media",
       name: "Upload media folder to Google Drive",
       callback: () => this.uploadMedia(),
@@ -231,10 +249,52 @@ export default class FolgitPlugin extends Plugin {
     try {
       await this.git(dir, `init -b ${quote(this.settings.defaultBranch)}`);
       await this.ensureIdentity(dir);
-      new Notice(`Initialized repo in '${folder.path}'.`);
+      const added = await this.ensureMediaIgnored(folder);
+      new Notice(
+        added
+          ? `Initialized repo in '${folder.path}'; added media folder to .gitignore.`
+          : `Initialized repo in '${folder.path}'.`
+      );
     } catch (e) {
       errorNotice("init failed", e);
     }
+  }
+
+  async ensureMediaIgnored(repo: TFolder): Promise<boolean> {
+    const media = this.settings.mediaFolderPath.trim();
+    if (!media) return false;
+    const mediaPath = normalizePath(media);
+    const repoPath = repo.path;
+
+    let rel: string;
+    if (!repoPath) {
+      rel = mediaPath;
+    } else if (mediaPath === repoPath) {
+      return false;
+    } else if (mediaPath.startsWith(repoPath + "/")) {
+      rel = mediaPath.slice(repoPath.length + 1);
+    } else {
+      return false;
+    }
+
+    const gitignorePath = path.join(this.absPath(repo), ".gitignore");
+    let content = "";
+    try {
+      content = await fs.readFile(gitignorePath, "utf8");
+    } catch {
+      // no existing file
+    }
+    const entry = rel.endsWith("/") ? rel : rel + "/";
+    const existing = new Set(
+      content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+    );
+    const variants = [rel, rel + "/", "/" + rel, "/" + rel + "/"];
+    if (variants.some((v) => existing.has(v))) return false;
+
+    const sep = content && !content.endsWith("\n") ? "\n" : "";
+    const block = `${sep}# Folgit: media folder synced via Google Drive\n${entry}\n`;
+    await fs.writeFile(gitignorePath, content + block);
+    return true;
   }
 
   async promptRemote(folder: TFolder) {
