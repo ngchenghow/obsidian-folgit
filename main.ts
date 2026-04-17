@@ -23,6 +23,10 @@ interface FolgitSettings {
   defaultCommitMessage: string;
   authorName: string;
   authorEmail: string;
+  mediaFolderPath: string;
+  rclonePath: string;
+  rcloneRemote: string;
+  rcloneExtraFlags: string;
 }
 
 const DEFAULT_SETTINGS: FolgitSettings = {
@@ -31,6 +35,10 @@ const DEFAULT_SETTINGS: FolgitSettings = {
   defaultCommitMessage: "Update from Obsidian",
   authorName: "",
   authorEmail: "",
+  mediaFolderPath: "",
+  rclonePath: "rclone",
+  rcloneRemote: "",
+  rcloneExtraFlags: "",
 };
 
 interface GitResult {
@@ -88,6 +96,18 @@ export default class FolgitPlugin extends Plugin {
       callback: () => this.pickRepoFolder("Select repo folder", (f) => this.showStatus(f)),
     });
 
+    this.addCommand({
+      id: "upload-media",
+      name: "Upload media folder to Google Drive",
+      callback: () => this.uploadMedia(),
+    });
+
+    this.addCommand({
+      id: "download-media",
+      name: "Download media folder from Google Drive",
+      callback: () => this.downloadMedia(),
+    });
+
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         if (!(file instanceof TFolder)) return;
@@ -116,6 +136,21 @@ export default class FolgitPlugin extends Plugin {
             .setIcon("download")
             .onClick(() => this.pull(file))
         );
+        if (this.isMediaFolder(file)) {
+          menu.addSeparator();
+          menu.addItem((item) =>
+            item
+              .setTitle("Folgit: Upload to Google Drive")
+              .setIcon("upload-cloud")
+              .onClick(() => this.uploadMedia())
+          );
+          menu.addItem((item) =>
+            item
+              .setTitle("Folgit: Download from Google Drive")
+              .setIcon("download-cloud")
+              .onClick(() => this.downloadMedia())
+          );
+        }
       })
     );
   }
@@ -327,6 +362,80 @@ export default class FolgitPlugin extends Plugin {
     }
   }
 
+  async rclone(args: string): Promise<GitResult> {
+    const cmd = `${quote(this.settings.rclonePath)} ${args}`;
+    try {
+      const { stdout, stderr } = await execAsync(cmd, {
+        cwd: this.vaultRoot(),
+        windowsHide: true,
+        maxBuffer: 50 * 1024 * 1024,
+      });
+      return { stdout, stderr };
+    } catch (e: unknown) {
+      const err = e as { stdout?: string; stderr?: string; message?: string };
+      throw new Error(err.stderr?.trim() || err.stdout?.trim() || err.message || "rclone failed");
+    }
+  }
+
+  getMediaFolder(): TFolder | null {
+    const p = this.settings.mediaFolderPath.trim();
+    if (!p) {
+      new Notice("Folgit: set the media folder path in settings.");
+      return null;
+    }
+    const f = this.app.vault.getAbstractFileByPath(normalizePath(p));
+    if (!(f instanceof TFolder)) {
+      new Notice(`Folgit: media folder '${p}' not found in vault.`);
+      return null;
+    }
+    return f;
+  }
+
+  isMediaFolder(folder: TFolder): boolean {
+    const configured = this.settings.mediaFolderPath.trim();
+    if (!configured) return false;
+    return normalizePath(configured) === folder.path;
+  }
+
+  async uploadMedia() {
+    const folder = this.getMediaFolder();
+    if (!folder) return;
+    const remote = this.settings.rcloneRemote.trim();
+    if (!remote) {
+      new Notice("Folgit: set an rclone remote (e.g. 'gdrive:obsidian-media') in settings.");
+      return;
+    }
+    const local = this.absPath(folder);
+    const extra = this.settings.rcloneExtraFlags.trim();
+    try {
+      new Notice(`Uploading '${folder.path}' → ${remote}…`);
+      const out = await this.rclone(`copy ${quote(local)} ${quote(remote)}${extra ? " " + extra : ""}`);
+      new Notice(`Uploaded: ${summarize(out)}`);
+    } catch (e) {
+      errorNotice("upload failed", e);
+    }
+  }
+
+  async downloadMedia() {
+    const folder = this.getMediaFolder();
+    if (!folder) return;
+    const remote = this.settings.rcloneRemote.trim();
+    if (!remote) {
+      new Notice("Folgit: set an rclone remote (e.g. 'gdrive:obsidian-media') in settings.");
+      return;
+    }
+    const local = this.absPath(folder);
+    const extra = this.settings.rcloneExtraFlags.trim();
+    try {
+      await fs.mkdir(local, { recursive: true });
+      new Notice(`Downloading ${remote} → '${folder.path}'…`);
+      const out = await this.rclone(`copy ${quote(remote)} ${quote(local)}${extra ? " " + extra : ""}`);
+      new Notice(`Downloaded: ${summarize(out)}`);
+    } catch (e) {
+      errorNotice("download failed", e);
+    }
+  }
+
   pickFolder(title: string, onPick: (folder: TFolder) => void) {
     const folders: TFolder[] = [];
     const walk = (f: TAbstractFile) => {
@@ -513,6 +622,64 @@ class FolgitSettingTab extends PluginSettingTab {
           this.plugin.settings.authorEmail = v;
           await this.plugin.saveSettings();
         })
+      );
+
+    containerEl.createEl("h3", { text: "Google Drive (media folder)" });
+    containerEl.createEl("p", {
+      text: "Folgit shells out to rclone for Drive sync. Run `rclone config` once to set up a Google Drive remote, then point the settings below at it.",
+      cls: "setting-item-description",
+    });
+
+    new Setting(containerEl)
+      .setName("Media folder")
+      .setDesc("Vault-relative path of the folder to sync with Google Drive (e.g. 'media').")
+      .addText((t) =>
+        t
+          .setPlaceholder("media")
+          .setValue(this.plugin.settings.mediaFolderPath)
+          .onChange(async (v) => {
+            this.plugin.settings.mediaFolderPath = v;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("rclone executable")
+      .setDesc("Path to the rclone binary. 'rclone' uses PATH.")
+      .addText((t) =>
+        t
+          .setPlaceholder("rclone")
+          .setValue(this.plugin.settings.rclonePath)
+          .onChange(async (v) => {
+            this.plugin.settings.rclonePath = v || "rclone";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("rclone remote")
+      .setDesc("Remote name and path, e.g. 'gdrive:obsidian-media'. Must match a remote from `rclone config`.")
+      .addText((t) =>
+        t
+          .setPlaceholder("gdrive:obsidian-media")
+          .setValue(this.plugin.settings.rcloneRemote)
+          .onChange(async (v) => {
+            this.plugin.settings.rcloneRemote = v;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("rclone extra flags")
+      .setDesc("Appended to every rclone invocation (e.g. '--fast-list --transfers=8').")
+      .addText((t) =>
+        t
+          .setPlaceholder("")
+          .setValue(this.plugin.settings.rcloneExtraFlags)
+          .onChange(async (v) => {
+            this.plugin.settings.rcloneExtraFlags = v;
+            await this.plugin.saveSettings();
+          })
       );
   }
 }
