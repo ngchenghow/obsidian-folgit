@@ -24,6 +24,7 @@ interface FolgitSettings {
   defaultCommitMessage: string;
   authorName: string;
   authorEmail: string;
+  commitName: string;
   githubToken: string;
   mediaFolderPath: string;
   driveClientId: string;
@@ -41,6 +42,7 @@ const DEFAULT_SETTINGS: FolgitSettings = {
   defaultCommitMessage: "Update from Obsidian",
   authorName: "",
   authorEmail: "",
+  commitName: "",
   githubToken: "",
   mediaFolderPath: "",
   driveClientId: "",
@@ -422,7 +424,8 @@ export default class FolgitPlugin extends Plugin {
       await this.git(dir, `add -A`);
       const status = await this.git(dir, `status --porcelain`);
       if (status.stdout.trim()) {
-        const msg = `Auto-sync ${timestamp()}`;
+        const name = this.settings.commitName.trim();
+        const msg = name ? `${name}: Auto-sync ${timestamp()}` : `Auto-sync ${timestamp()}`;
         await this.git(dir, `commit -m ${quote(msg)}`);
         new Notice(`Committed: ${msg}`);
       } else {
@@ -972,6 +975,19 @@ class FolgitSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.defaultCommitMessage)
           .onChange(async (v) => {
             this.plugin.settings.defaultCommitMessage = v || DEFAULT_SETTINGS.defaultCommitMessage;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Commit name")
+      .setDesc("Prepended to Sync push auto-commit messages (e.g. device or vault name). Leave blank to omit.")
+      .addText((t) =>
+        t
+          .setPlaceholder("e.g. laptop, desktop, phone")
+          .setValue(this.plugin.settings.commitName)
+          .onChange(async (v) => {
+            this.plugin.settings.commitName = v;
             await this.plugin.saveSettings();
           })
       );
