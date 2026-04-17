@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-folgit",
+  "name": "Folgit",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Turn any vault folder into a Git repository. Clone from GitHub, commit, push, and pull per-folder.",
+  "author": "ngchenghow",
+  "authorUrl": "https://github.com/ngchenghow",
+  "isDesktopOnly": true
+}
