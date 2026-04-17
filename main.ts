@@ -169,21 +169,19 @@ export default class FolgitPlugin extends Plugin {
             .setIcon("download")
             .onClick(() => this.pull(file))
         );
-        if (this.isMediaFolder(file)) {
-          menu.addSeparator();
-          menu.addItem((item) =>
-            item
-              .setTitle("Folgit: Upload to Google Drive")
-              .setIcon("upload-cloud")
-              .onClick(() => this.uploadMedia())
-          );
-          menu.addItem((item) =>
-            item
-              .setTitle("Folgit: Download from Google Drive")
-              .setIcon("download-cloud")
-              .onClick(() => this.downloadMedia())
-          );
-        }
+        menu.addSeparator();
+        menu.addItem((item) =>
+          item
+            .setTitle("Folgit: Upload to Google Drive")
+            .setIcon("upload-cloud")
+            .onClick(() => this.uploadFolder(file))
+        );
+        menu.addItem((item) =>
+          item
+            .setTitle("Folgit: Download from Google Drive")
+            .setIcon("download-cloud")
+            .onClick(() => this.downloadFolder(file))
+        );
       })
     );
   }
@@ -464,12 +462,6 @@ export default class FolgitPlugin extends Plugin {
     return f;
   }
 
-  isMediaFolder(folder: TFolder): boolean {
-    const configured = this.settings.mediaFolderPath.trim();
-    if (!configured) return false;
-    return normalizePath(configured) === folder.path;
-  }
-
   driveClient(): DriveClient | null {
     if (!this.settings.driveClientId || !this.settings.driveClientSecret) {
       new Notice("Folgit: set Google OAuth client ID and secret in settings.");
@@ -536,36 +528,82 @@ export default class FolgitPlugin extends Plugin {
   async uploadMedia() {
     const folder = this.getMediaFolder();
     if (!folder) return;
+    await this.uploadFolder(folder);
+  }
+
+  async downloadMedia() {
+    const folder = this.getMediaFolder();
+    if (!folder) return;
+    await this.downloadFolder(folder);
+  }
+
+  async uploadFolder(folder: TFolder) {
     const client = this.driveClient();
     if (!client) return;
     const local = this.absPath(folder);
     try {
-      new Notice(`Uploading '${folder.path}' → Google Drive…`);
+      new Notice(`Uploading '${folder.path || "/"}' → Google Drive…`);
       const rootId = await this.ensureDriveFolderId(client);
+      const segments = folder.path ? folder.path.split("/").filter(Boolean) : [];
+      const targetId = await this.ensureDrivePath(client, rootId, segments);
       const counts = { uploaded: 0, skipped: 0, folders: 0 };
-      await this.uploadTree(client, local, rootId, counts);
+      await this.uploadTree(client, local, targetId, counts);
       new Notice(`Uploaded: ${counts.uploaded} file(s), ${counts.skipped} unchanged.`);
     } catch (e) {
       errorNotice("upload failed", e);
     }
   }
 
-  async downloadMedia() {
-    const folder = this.getMediaFolder();
-    if (!folder) return;
+  async downloadFolder(folder: TFolder) {
     const client = this.driveClient();
     if (!client) return;
     const local = this.absPath(folder);
     try {
       await fs.mkdir(local, { recursive: true });
-      new Notice(`Downloading from Google Drive → '${folder.path}'…`);
+      new Notice(`Downloading from Google Drive → '${folder.path || "/"}'…`);
       const rootId = await this.ensureDriveFolderId(client);
+      const segments = folder.path ? folder.path.split("/").filter(Boolean) : [];
+      const targetId = await this.findDrivePath(client, rootId, segments);
+      if (!targetId) {
+        new Notice(`Folgit: '${folder.path}' not found on Google Drive — nothing to download.`);
+        return;
+      }
       const counts = { downloaded: 0, skipped: 0 };
-      await this.downloadTree(client, rootId, local, counts);
+      await this.downloadTree(client, targetId, local, counts);
       new Notice(`Downloaded: ${counts.downloaded} file(s), ${counts.skipped} unchanged.`);
     } catch (e) {
       errorNotice("download failed", e);
     }
+  }
+
+  private async ensureDrivePath(client: DriveClient, rootId: string, segments: string[]): Promise<string> {
+    let parentId = rootId;
+    for (const seg of segments) {
+      const children = await client.listChildren(parentId);
+      const existing = children.find((c) => c.name === seg && c.mimeType === FOLDER_MIME);
+      if (existing) {
+        parentId = existing.id;
+      } else {
+        const created = await client.createFolder(seg, parentId);
+        parentId = created.id;
+      }
+    }
+    return parentId;
+  }
+
+  private async findDrivePath(
+    client: DriveClient,
+    rootId: string,
+    segments: string[]
+  ): Promise<string | null> {
+    let parentId = rootId;
+    for (const seg of segments) {
+      const children = await client.listChildren(parentId);
+      const existing = children.find((c) => c.name === seg && c.mimeType === FOLDER_MIME);
+      if (!existing) return null;
+      parentId = existing.id;
+    }
+    return parentId;
   }
 
   private async uploadTree(

@@ -16,10 +16,9 @@ Desktop only. Uses your system `git`. Google Drive is spoken directly via the Dr
 - **Status** — porcelain status in a modal.
 - **Right-click folders** — the commands show up in the folder context menu.
 
-### Google Drive (media folder)
-- **Upload media folder to Google Drive** — recursively mirrors the local media folder into a folder on your Drive (creates subfolders as needed, skips files whose size already matches remotely).
-- **Download media folder from Google Drive** — the reverse: pulls every file from the Drive folder into the local media folder, skipping unchanged files.
-- **Right-click the media folder** — upload/download entries appear on the folder matching your configured path.
+### Google Drive (any folder)
+- **Right-click any folder → Upload / Download to Google Drive** — mirrors the folder to `<Drive root>/<vault-relative path>/`. Creates subfolders on Drive as needed. Skips files whose size already matches.
+- **Upload media folder to Google Drive** / **Download media folder from Google Drive** (command palette) — same thing but targets the path you set in *Media folder* settings, for one-keystroke sync of the folder you use most.
 
 Drive sync is intended for large binaries (images, audio, video) that you don't want in Git. Designate one folder (e.g. `media/`) as your Drive-backed folder and keep everything else in Git. Folgit uses the `drive.file` OAuth scope — it can only see files it creates, never the rest of your Drive.
 
