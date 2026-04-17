@@ -24,6 +24,7 @@ interface FolgitSettings {
   defaultCommitMessage: string;
   authorName: string;
   authorEmail: string;
+  githubToken: string;
   mediaFolderPath: string;
   driveClientId: string;
   driveClientSecret: string;
@@ -40,6 +41,7 @@ const DEFAULT_SETTINGS: FolgitSettings = {
   defaultCommitMessage: "Update from Obsidian",
   authorName: "",
   authorEmail: "",
+  githubToken: "",
   mediaFolderPath: "",
   driveClientId: "",
   driveClientSecret: "",
@@ -234,7 +236,7 @@ export default class FolgitPlugin extends Plugin {
   }
 
   async git(cwd: string, args: string): Promise<GitResult> {
-    const cmd = `${quote(this.settings.gitPath)} ${args}`;
+    const cmd = `${quote(this.settings.gitPath)}${this.githubAuthFlags()} ${args}`;
     try {
       const { stdout, stderr } = await execAsync(cmd, { cwd, windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
       return { stdout, stderr };
@@ -242,6 +244,13 @@ export default class FolgitPlugin extends Plugin {
       const err = e as { stdout?: string; stderr?: string; message?: string };
       throw new Error(err.stderr?.trim() || err.stdout?.trim() || err.message || "git failed");
     }
+  }
+
+  private githubAuthFlags(): string {
+    const token = this.settings.githubToken.trim();
+    if (!token) return "";
+    const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
+    return ` -c ${quote(`http.https://github.com/.extraheader=Authorization: Basic ${basic}`)}`;
   }
 
   async isRepo(folder: TFolder | string): Promise<boolean> {
@@ -985,6 +994,24 @@ class FolgitSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    containerEl.createEl("h3", { text: "GitHub" });
+    const ghHint = containerEl.createEl("p", { cls: "setting-item-description" });
+    ghHint.appendText(
+      "Personal access token used for HTTPS operations against github.com. Create one at github.com/settings/tokens (fine-grained: grant 'Contents: read/write' on the target repos). Stored in this vault's plugin data. Leave blank to fall back to your system git credential helper."
+    );
+
+    new Setting(containerEl)
+      .setName("GitHub token")
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setPlaceholder("ghp_… or github_pat_…")
+          .setValue(this.plugin.settings.githubToken)
+          .onChange(async (v) => {
+            this.plugin.settings.githubToken = v.trim();
+            await this.plugin.saveSettings();
+          });
+      });
 
     containerEl.createEl("h3", { text: "Google Drive (media folder)" });
     const howto = containerEl.createEl("p", { cls: "setting-item-description" });
