@@ -14,6 +14,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import * as path from "path";
 import * as fs from "fs/promises";
+import { DriveClient, DriveFile, DriveTokens, FOLDER_MIME, runOAuth } from "./drive";
 
 const execAsync = promisify(exec);
 
@@ -24,9 +25,13 @@ interface FolgitSettings {
   authorName: string;
   authorEmail: string;
   mediaFolderPath: string;
-  rclonePath: string;
-  rcloneRemote: string;
-  rcloneExtraFlags: string;
+  driveClientId: string;
+  driveClientSecret: string;
+  driveFolderName: string;
+  driveFolderId: string;
+  driveRefreshToken: string;
+  driveAccessToken: string;
+  driveExpiresAt: number;
 }
 
 const DEFAULT_SETTINGS: FolgitSettings = {
@@ -36,9 +41,13 @@ const DEFAULT_SETTINGS: FolgitSettings = {
   authorName: "",
   authorEmail: "",
   mediaFolderPath: "",
-  rclonePath: "rclone",
-  rcloneRemote: "",
-  rcloneExtraFlags: "",
+  driveClientId: "",
+  driveClientSecret: "",
+  driveFolderName: "Obsidian Media",
+  driveFolderId: "",
+  driveRefreshToken: "",
+  driveAccessToken: "",
+  driveExpiresAt: 0,
 };
 
 interface GitResult {
@@ -381,21 +390,6 @@ export default class FolgitPlugin extends Plugin {
     }
   }
 
-  async rclone(args: string): Promise<GitResult> {
-    const cmd = `${quote(this.settings.rclonePath)} ${args}`;
-    try {
-      const { stdout, stderr } = await execAsync(cmd, {
-        cwd: this.vaultRoot(),
-        windowsHide: true,
-        maxBuffer: 50 * 1024 * 1024,
-      });
-      return { stdout, stderr };
-    } catch (e: unknown) {
-      const err = e as { stdout?: string; stderr?: string; message?: string };
-      throw new Error(err.stderr?.trim() || err.stdout?.trim() || err.message || "rclone failed");
-    }
-  }
-
   getMediaFolder(): TFolder | null {
     const p = this.settings.mediaFolderPath.trim();
     if (!p) {
@@ -416,20 +410,81 @@ export default class FolgitPlugin extends Plugin {
     return normalizePath(configured) === folder.path;
   }
 
+  driveClient(): DriveClient | null {
+    if (!this.settings.driveClientId || !this.settings.driveClientSecret) {
+      new Notice("Folgit: set Google OAuth client ID and secret in settings.");
+      return null;
+    }
+    if (!this.settings.driveRefreshToken) {
+      new Notice("Folgit: authorize with Google first (settings → Authorize).");
+      return null;
+    }
+    const tokens: DriveTokens = {
+      refreshToken: this.settings.driveRefreshToken,
+      accessToken: this.settings.driveAccessToken || undefined,
+      expiresAt: this.settings.driveExpiresAt || undefined,
+    };
+    return new DriveClient(
+      this.settings.driveClientId,
+      this.settings.driveClientSecret,
+      tokens,
+      async (t) => {
+        this.settings.driveAccessToken = t.accessToken ?? "";
+        this.settings.driveExpiresAt = t.expiresAt ?? 0;
+        this.settings.driveRefreshToken = t.refreshToken;
+        await this.saveSettings();
+      }
+    );
+  }
+
+  async authorizeDrive(): Promise<void> {
+    const { driveClientId, driveClientSecret } = this.settings;
+    if (!driveClientId || !driveClientSecret) {
+      new Notice("Folgit: enter your OAuth client ID and secret first.");
+      return;
+    }
+    try {
+      new Notice("Opening Google in your browser…");
+      const tokens = await runOAuth(driveClientId, driveClientSecret);
+      this.settings.driveRefreshToken = tokens.refreshToken;
+      this.settings.driveAccessToken = tokens.accessToken ?? "";
+      this.settings.driveExpiresAt = tokens.expiresAt ?? 0;
+      await this.saveSettings();
+      new Notice("Folgit: authorized with Google Drive.");
+    } catch (e) {
+      errorNotice("authorize failed", e);
+    }
+  }
+
+  async signOutDrive(): Promise<void> {
+    this.settings.driveRefreshToken = "";
+    this.settings.driveAccessToken = "";
+    this.settings.driveExpiresAt = 0;
+    this.settings.driveFolderId = "";
+    await this.saveSettings();
+    new Notice("Folgit: signed out of Google Drive.");
+  }
+
+  async ensureDriveFolderId(client: DriveClient): Promise<string> {
+    if (this.settings.driveFolderId) return this.settings.driveFolderId;
+    const id = await client.ensureRootFolder(this.settings.driveFolderName || "Obsidian Media");
+    this.settings.driveFolderId = id;
+    await this.saveSettings();
+    return id;
+  }
+
   async uploadMedia() {
     const folder = this.getMediaFolder();
     if (!folder) return;
-    const remote = this.settings.rcloneRemote.trim();
-    if (!remote) {
-      new Notice("Folgit: set an rclone remote (e.g. 'gdrive:obsidian-media') in settings.");
-      return;
-    }
+    const client = this.driveClient();
+    if (!client) return;
     const local = this.absPath(folder);
-    const extra = this.settings.rcloneExtraFlags.trim();
     try {
-      new Notice(`Uploading '${folder.path}' → ${remote}…`);
-      const out = await this.rclone(`copy ${quote(local)} ${quote(remote)}${extra ? " " + extra : ""}`);
-      new Notice(`Uploaded: ${summarize(out)}`);
+      new Notice(`Uploading '${folder.path}' → Google Drive…`);
+      const rootId = await this.ensureDriveFolderId(client);
+      const counts = { uploaded: 0, skipped: 0, folders: 0 };
+      await this.uploadTree(client, local, rootId, counts);
+      new Notice(`Uploaded: ${counts.uploaded} file(s), ${counts.skipped} unchanged.`);
     } catch (e) {
       errorNotice("upload failed", e);
     }
@@ -438,20 +493,89 @@ export default class FolgitPlugin extends Plugin {
   async downloadMedia() {
     const folder = this.getMediaFolder();
     if (!folder) return;
-    const remote = this.settings.rcloneRemote.trim();
-    if (!remote) {
-      new Notice("Folgit: set an rclone remote (e.g. 'gdrive:obsidian-media') in settings.");
-      return;
-    }
+    const client = this.driveClient();
+    if (!client) return;
     const local = this.absPath(folder);
-    const extra = this.settings.rcloneExtraFlags.trim();
     try {
       await fs.mkdir(local, { recursive: true });
-      new Notice(`Downloading ${remote} → '${folder.path}'…`);
-      const out = await this.rclone(`copy ${quote(remote)} ${quote(local)}${extra ? " " + extra : ""}`);
-      new Notice(`Downloaded: ${summarize(out)}`);
+      new Notice(`Downloading from Google Drive → '${folder.path}'…`);
+      const rootId = await this.ensureDriveFolderId(client);
+      const counts = { downloaded: 0, skipped: 0 };
+      await this.downloadTree(client, rootId, local, counts);
+      new Notice(`Downloaded: ${counts.downloaded} file(s), ${counts.skipped} unchanged.`);
     } catch (e) {
       errorNotice("download failed", e);
+    }
+  }
+
+  private async uploadTree(
+    client: DriveClient,
+    localDir: string,
+    driveParentId: string,
+    counts: { uploaded: number; skipped: number; folders: number }
+  ): Promise<void> {
+    const entries = await fs.readdir(localDir, { withFileTypes: true });
+    const remote = await client.listChildren(driveParentId);
+    const remoteByName = new Map<string, DriveFile>();
+    for (const r of remote) remoteByName.set(r.name, r);
+
+    for (const entry of entries) {
+      if (entry.name === ".DS_Store" || entry.name === "Thumbs.db") continue;
+      const abs = path.join(localDir, entry.name);
+      const existing = remoteByName.get(entry.name);
+      if (entry.isDirectory()) {
+        const subId =
+          existing && existing.mimeType === FOLDER_MIME
+            ? existing.id
+            : (await client.createFolder(entry.name, driveParentId)).id;
+        if (!existing) counts.folders++;
+        await this.uploadTree(client, abs, subId, counts);
+      } else if (entry.isFile()) {
+        const stat = await fs.stat(abs);
+        if (
+          existing &&
+          existing.mimeType !== FOLDER_MIME &&
+          existing.size === String(stat.size)
+        ) {
+          counts.skipped++;
+          continue;
+        }
+        const bytes = await fs.readFile(abs);
+        await client.uploadFile(
+          entry.name,
+          driveParentId,
+          new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+          guessMime(entry.name),
+          existing && existing.mimeType !== FOLDER_MIME ? existing.id : undefined
+        );
+        counts.uploaded++;
+      }
+    }
+  }
+
+  private async downloadTree(
+    client: DriveClient,
+    driveParentId: string,
+    localDir: string,
+    counts: { downloaded: number; skipped: number }
+  ): Promise<void> {
+    await fs.mkdir(localDir, { recursive: true });
+    const remote = await client.listChildren(driveParentId);
+    for (const r of remote) {
+      const abs = path.join(localDir, r.name);
+      if (r.mimeType === FOLDER_MIME) {
+        await this.downloadTree(client, r.id, abs, counts);
+        continue;
+      }
+      if (r.mimeType.startsWith("application/vnd.google-apps")) continue;
+      const existing = await fs.stat(abs).catch(() => null);
+      if (existing && r.size !== undefined && existing.size === Number(r.size)) {
+        counts.skipped++;
+        continue;
+      }
+      const buf = await client.downloadFile(r.id);
+      await fs.writeFile(abs, new Uint8Array(buf));
+      counts.downloaded++;
     }
   }
 
@@ -491,6 +615,37 @@ function summarize(r: GitResult): string {
 function guessFolderName(url: string): string {
   const m = url.match(/\/([^/]+?)(?:\.git)?\/?$/);
   return m ? m[1] : "repo";
+}
+
+const MIME_BY_EXT: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  bmp: "image/bmp",
+  ico: "image/x-icon",
+  tiff: "image/tiff",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  flac: "audio/flac",
+  m4a: "audio/mp4",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
+  mkv: "video/x-matroska",
+  pdf: "application/pdf",
+  txt: "text/plain",
+  md: "text/markdown",
+  json: "application/json",
+  zip: "application/zip",
+};
+
+function guessMime(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase();
+  return (ext && MIME_BY_EXT[ext]) || "application/octet-stream";
 }
 
 function errorNotice(prefix: string, e: unknown) {
@@ -644,10 +799,10 @@ class FolgitSettingTab extends PluginSettingTab {
       );
 
     containerEl.createEl("h3", { text: "Google Drive (media folder)" });
-    containerEl.createEl("p", {
-      text: "Folgit shells out to rclone for Drive sync. Run `rclone config` once to set up a Google Drive remote, then point the settings below at it.",
-      cls: "setting-item-description",
-    });
+    const howto = containerEl.createEl("p", { cls: "setting-item-description" });
+    howto.appendText(
+      "Create an OAuth 2.0 Client ID of type 'Desktop app' in Google Cloud Console, enable the Drive API, then paste the client ID and secret below and click Authorize. Folgit uses the drive.file scope — it only sees files it creates."
+    );
 
     new Setting(containerEl)
       .setName("Media folder")
@@ -663,42 +818,64 @@ class FolgitSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("rclone executable")
-      .setDesc("Path to the rclone binary. 'rclone' uses PATH.")
+      .setName("Google OAuth client ID")
       .addText((t) =>
         t
-          .setPlaceholder("rclone")
-          .setValue(this.plugin.settings.rclonePath)
+          .setPlaceholder("xxxxx.apps.googleusercontent.com")
+          .setValue(this.plugin.settings.driveClientId)
           .onChange(async (v) => {
-            this.plugin.settings.rclonePath = v || "rclone";
+            this.plugin.settings.driveClientId = v.trim();
             await this.plugin.saveSettings();
           })
       );
 
     new Setting(containerEl)
-      .setName("rclone remote")
-      .setDesc("Remote name and path, e.g. 'gdrive:obsidian-media'. Must match a remote from `rclone config`.")
+      .setName("Google OAuth client secret")
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setValue(this.plugin.settings.driveClientSecret).onChange(async (v) => {
+          this.plugin.settings.driveClientSecret = v.trim();
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Drive folder name")
+      .setDesc("Folder created in the root of your Drive on first upload.")
       .addText((t) =>
         t
-          .setPlaceholder("gdrive:obsidian-media")
-          .setValue(this.plugin.settings.rcloneRemote)
+          .setPlaceholder("Obsidian Media")
+          .setValue(this.plugin.settings.driveFolderName)
           .onChange(async (v) => {
-            this.plugin.settings.rcloneRemote = v;
+            this.plugin.settings.driveFolderName = v || "Obsidian Media";
             await this.plugin.saveSettings();
           })
       );
 
-    new Setting(containerEl)
-      .setName("rclone extra flags")
-      .setDesc("Appended to every rclone invocation (e.g. '--fast-list --transfers=8').")
-      .addText((t) =>
-        t
-          .setPlaceholder("")
-          .setValue(this.plugin.settings.rcloneExtraFlags)
-          .onChange(async (v) => {
-            this.plugin.settings.rcloneExtraFlags = v;
-            await this.plugin.saveSettings();
+    const authSetting = new Setting(containerEl).setName("Authorization");
+    const status = this.plugin.settings.driveRefreshToken
+      ? `Signed in${this.plugin.settings.driveFolderId ? ` · folder ${this.plugin.settings.driveFolderId.slice(0, 8)}…` : ""}`
+      : "Not signed in";
+    authSetting.setDesc(status);
+    authSetting.addButton((b) =>
+      b
+        .setButtonText("Authorize")
+        .setCta()
+        .onClick(async () => {
+          await this.plugin.authorizeDrive();
+          this.display();
+        })
+    );
+    if (this.plugin.settings.driveRefreshToken) {
+      authSetting.addButton((b) =>
+        b
+          .setButtonText("Sign out")
+          .setWarning()
+          .onClick(async () => {
+            await this.plugin.signOutDrive();
+            this.display();
           })
       );
+    }
   }
 }

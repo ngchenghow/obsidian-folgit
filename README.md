@@ -1,8 +1,8 @@
 # Folgit
 
-Per-folder Git for Obsidian, plus Google Drive sync for a designated media folder. Clone, commit, push, pull — or upload/download binaries to Drive — without leaving Obsidian.
+Per-folder Git for Obsidian, plus native Google Drive sync for a designated media folder. Clone, commit, push, pull — or upload/download binaries to Drive — without leaving Obsidian.
 
-Desktop only. Uses your system `git` and (for Drive) `rclone`.
+Desktop only. Uses your system `git`. Google Drive is spoken directly via the Drive REST API with OAuth 2.0.
 
 ## Features
 
@@ -17,11 +17,11 @@ Desktop only. Uses your system `git` and (for Drive) `rclone`.
 - **Right-click folders** — the commands show up in the folder context menu.
 
 ### Google Drive (media folder)
-- **Upload media folder to Google Drive** — `rclone copy <media> <remote>`.
-- **Download media folder from Google Drive** — `rclone copy <remote> <media>`.
+- **Upload media folder to Google Drive** — recursively mirrors the local media folder into a folder on your Drive (creates subfolders as needed, skips files whose size already matches remotely).
+- **Download media folder from Google Drive** — the reverse: pulls every file from the Drive folder into the local media folder, skipping unchanged files.
 - **Right-click the media folder** — upload/download entries appear on the folder matching your configured path.
 
-Drive sync is intended for large binaries (images, audio, video) that you don't want in Git. Designate one folder (e.g. `media/`) as your Drive-backed folder and keep everything else in Git.
+Drive sync is intended for large binaries (images, audio, video) that you don't want in Git. Designate one folder (e.g. `media/`) as your Drive-backed folder and keep everything else in Git. Folgit uses the `drive.file` OAuth scope — it can only see files it creates, never the rest of your Drive.
 
 ## Settings
 
@@ -33,16 +33,19 @@ Drive sync is intended for large binaries (images, audio, video) that you don't 
 
 **Google Drive**
 - Media folder — vault-relative path of the folder to sync (e.g. `media`)
-- rclone executable path (defaults to `rclone` on PATH)
-- rclone remote — e.g. `gdrive:obsidian-media`. Must match a remote you've set up via `rclone config`.
-- rclone extra flags — appended to every call (e.g. `--fast-list --transfers=8`)
+- Google OAuth client ID & client secret — from a "Desktop app" OAuth 2.0 client in Google Cloud Console
+- Drive folder name — the folder Folgit creates in the root of your Drive on first upload (defaults to `Obsidian Media`)
+- Authorize / Sign out buttons
 
 ## Setting up Drive sync
 
-1. Install [rclone](https://rclone.org/downloads/).
-2. Run `rclone config` and follow the prompts to create a Google Drive remote. Name it something short (e.g. `gdrive`).
-3. In Folgit settings, set *Media folder* to a vault-relative path and *rclone remote* to `<remote>:<subpath>` (e.g. `gdrive:obsidian-media`).
-4. Use the *Upload media folder* / *Download media folder* commands, or right-click the media folder.
+1. In [Google Cloud Console](https://console.cloud.google.com/), create or select a project.
+2. Enable the **Google Drive API** under APIs & Services.
+3. Under *APIs & Services → Credentials*, create an **OAuth 2.0 Client ID** of type **Desktop app**. Copy the client ID and client secret.
+4. In Folgit settings, paste the client ID and secret, set *Media folder*, and click **Authorize**. A browser window opens for Google consent; the plugin captures the code on a loopback port.
+5. Use *Upload media folder to Google Drive* / *Download media folder from Google Drive*, or right-click the media folder.
+
+Tokens are stored in `<vault>/.obsidian/plugins/obsidian-folgit/data.json`. Click **Sign out** to revoke locally and clear them.
 
 ## Install (manual)
 
