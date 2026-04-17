@@ -120,6 +120,12 @@ export default class FolgitPlugin extends Plugin {
         );
         menu.addItem((item) =>
           item
+            .setTitle("Folgit: Clone GitHub repo here")
+            .setIcon("git-branch-plus")
+            .onClick(() => this.promptCloneInto(file))
+        );
+        menu.addItem((item) =>
+          item
             .setTitle("Folgit: Commit changes")
             .setIcon("check")
             .onClick(() => this.promptCommit(file))
@@ -329,6 +335,19 @@ export default class FolgitPlugin extends Plugin {
           placeholder: guessFolderName(url),
           submit: async (rel) => this.clone(url, rel || guessFolderName(url)),
         }).open();
+      },
+    }).open();
+  }
+
+  promptCloneInto(parent: TFolder) {
+    new PromptModal(this.app, {
+      title: `Clone GitHub repo into '${parent.path || "/"}'`,
+      placeholder: "https://github.com/user/repo.git",
+      submit: async (url) => {
+        if (!url) return;
+        const name = guessFolderName(url);
+        const rel = parent.path ? `${parent.path}/${name}` : name;
+        await this.clone(url, rel);
       },
     }).open();
   }
