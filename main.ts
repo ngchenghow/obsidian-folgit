@@ -106,6 +106,18 @@ export default class FolgitPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "sync-push",
+      name: "Sync push (commit, push, upload media to Drive)",
+      callback: () => this.pickRepoFolder("Select repo folder to sync push", (f) => this.syncPush(f)),
+    });
+
+    this.addCommand({
+      id: "sync-pull",
+      name: "Sync pull (pull, download media from Drive)",
+      callback: () => this.pickRepoFolder("Select repo folder to sync pull", (f) => this.syncPull(f)),
+    });
+
+    this.addCommand({
       id: "ignore-media-in-repo",
       name: "Ignore media folder in a repo's .gitignore",
       callback: () =>
@@ -168,6 +180,19 @@ export default class FolgitPlugin extends Plugin {
             .setTitle("Folgit: Pull")
             .setIcon("download")
             .onClick(() => this.pull(file))
+        );
+        menu.addSeparator();
+        menu.addItem((item) =>
+          item
+            .setTitle("Folgit: Sync push")
+            .setIcon("arrow-up-circle")
+            .onClick(() => this.syncPush(file))
+        );
+        menu.addItem((item) =>
+          item
+            .setTitle("Folgit: Sync pull")
+            .setIcon("arrow-down-circle")
+            .onClick(() => this.syncPull(file))
         );
         menu.addSeparator();
         menu.addItem((item) =>
@@ -375,6 +400,65 @@ export default class FolgitPlugin extends Plugin {
     } catch (e) {
       errorNotice("pull failed", e);
     }
+  }
+
+  async syncPush(folder: TFolder) {
+    if (!(await this.isRepo(folder))) {
+      new Notice(`'${folder.path}' is not a Git repo.`);
+      return;
+    }
+    const dir = this.absPath(folder);
+    try {
+      await this.ensureIdentity(dir);
+      await this.git(dir, `add -A`);
+      const status = await this.git(dir, `status --porcelain`);
+      if (status.stdout.trim()) {
+        const msg = `Auto-sync ${timestamp()}`;
+        await this.git(dir, `commit -m ${quote(msg)}`);
+        new Notice(`Committed: ${msg}`);
+      } else {
+        new Notice("No local changes to commit.");
+      }
+      const branch =
+        (await this.git(dir, `rev-parse --abbrev-ref HEAD`)).stdout.trim() || this.settings.defaultBranch;
+      new Notice(`Pushing ${branch}…`);
+      const out = await this.git(dir, `push -u origin ${quote(branch)}`);
+      new Notice(`Pushed: ${summarize(out)}`);
+    } catch (e) {
+      errorNotice("sync push (git) failed", e);
+    }
+
+    const media = this.resolveMediaFolderSilent();
+    if (media && this.settings.driveRefreshToken) {
+      await this.uploadFolder(media);
+    }
+  }
+
+  async syncPull(folder: TFolder) {
+    if (!(await this.isRepo(folder))) {
+      new Notice(`'${folder.path}' is not a Git repo.`);
+      return;
+    }
+    const dir = this.absPath(folder);
+    try {
+      new Notice("Pulling…");
+      const out = await this.git(dir, `pull --ff-only`);
+      new Notice(`Pulled: ${summarize(out)}`);
+    } catch (e) {
+      errorNotice("sync pull (git) failed", e);
+    }
+
+    const media = this.resolveMediaFolderSilent();
+    if (media && this.settings.driveRefreshToken) {
+      await this.downloadFolder(media);
+    }
+  }
+
+  private resolveMediaFolderSilent(): TFolder | null {
+    const p = this.settings.mediaFolderPath.trim();
+    if (!p) return null;
+    const f = this.app.vault.getAbstractFileByPath(normalizePath(p));
+    return f instanceof TFolder ? f : null;
   }
 
   async showStatus(folder: TFolder) {
@@ -708,6 +792,12 @@ function quote(s: string): string {
 function summarize(r: GitResult): string {
   const text = (r.stderr || r.stdout || "").split("\n").filter(Boolean).slice(-2).join(" · ");
   return text || "ok";
+}
+
+function timestamp(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function guessFolderName(url: string): string {
