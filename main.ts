@@ -26,7 +26,7 @@ interface FolgitSettings {
   authorEmail: string;
   commitName: string;
   githubToken: string;
-  mediaFolderPath: string;
+  mediaFolderName: string;
   driveClientId: string;
   driveClientSecret: string;
   driveFolderName: string;
@@ -44,7 +44,7 @@ const DEFAULT_SETTINGS: FolgitSettings = {
   authorEmail: "",
   commitName: "",
   githubToken: "",
-  mediaFolderPath: "",
+  mediaFolderName: "media",
   driveClientId: "",
   driveClientSecret: "",
   driveFolderName: "Obsidian Media",
@@ -126,15 +126,15 @@ export default class FolgitPlugin extends Plugin {
       name: "Ignore media folder in a repo's .gitignore",
       callback: () =>
         this.pickRepoFolder("Select repo folder to update .gitignore", async (f) => {
-          if (!this.settings.mediaFolderPath.trim()) {
-            new Notice("Folgit: set the media folder path in settings first.");
+          if (!this.settings.mediaFolderName.trim()) {
+            new Notice("Folgit: set the media folder name in settings first.");
             return;
           }
           const added = await this.ensureMediaIgnored(f);
           new Notice(
             added
-              ? `Added media folder to '${f.path}/.gitignore'.`
-              : `No change — media folder already ignored or not inside '${f.path}'.`
+              ? `Added '${this.settings.mediaFolderName}/' to '${f.path}/.gitignore'.`
+              : `No change — '${this.settings.mediaFolderName}/' already ignored.`
           );
         }),
     });
@@ -295,21 +295,8 @@ export default class FolgitPlugin extends Plugin {
   }
 
   async ensureMediaIgnored(repo: TFolder): Promise<boolean> {
-    const media = this.settings.mediaFolderPath.trim();
-    if (!media) return false;
-    const mediaPath = normalizePath(media);
-    const repoPath = repo.path;
-
-    let rel: string;
-    if (!repoPath) {
-      rel = mediaPath;
-    } else if (mediaPath === repoPath) {
-      return false;
-    } else if (mediaPath.startsWith(repoPath + "/")) {
-      rel = mediaPath.slice(repoPath.length + 1);
-    } else {
-      return false;
-    }
+    const name = this.settings.mediaFolderName.trim();
+    if (!name) return false;
 
     const gitignorePath = path.join(this.absPath(repo), ".gitignore");
     let content = "";
@@ -318,15 +305,15 @@ export default class FolgitPlugin extends Plugin {
     } catch {
       // no existing file
     }
-    const entry = rel.endsWith("/") ? rel : rel + "/";
+    const entry = `${name}/`;
     const existing = new Set(
       content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
     );
-    const variants = [rel, rel + "/", "/" + rel, "/" + rel + "/"];
+    const variants = [name, entry, `/${name}`, `/${entry}`];
     if (variants.some((v) => existing.has(v))) return false;
 
     const sep = content && !content.endsWith("\n") ? "\n" : "";
-    const block = `${sep}# Folgit: media folder synced via Google Drive\n${entry}\n`;
+    const block = `${sep}# Folgit: '${name}' folders are synced via Google Drive\n${entry}\n`;
     await fs.writeFile(gitignorePath, content + block);
     return true;
   }
@@ -440,9 +427,8 @@ export default class FolgitPlugin extends Plugin {
       errorNotice("sync push (git) failed", e);
     }
 
-    const media = this.resolveMediaFolderSilent();
-    if (media && this.settings.driveRefreshToken) {
-      await this.uploadFolder(media);
+    if (this.settings.driveRefreshToken) {
+      await this.uploadFolder(folder);
     }
   }
 
@@ -460,17 +446,9 @@ export default class FolgitPlugin extends Plugin {
       errorNotice("sync pull (git) failed", e);
     }
 
-    const media = this.resolveMediaFolderSilent();
-    if (media && this.settings.driveRefreshToken) {
-      await this.downloadFolder(media);
+    if (this.settings.driveRefreshToken) {
+      await this.downloadFolder(folder);
     }
-  }
-
-  private resolveMediaFolderSilent(): TFolder | null {
-    const p = this.settings.mediaFolderPath.trim();
-    if (!p) return null;
-    const f = this.app.vault.getAbstractFileByPath(normalizePath(p));
-    return f instanceof TFolder ? f : null;
   }
 
   async showStatus(folder: TFolder) {
@@ -544,18 +522,42 @@ export default class FolgitPlugin extends Plugin {
     }
   }
 
-  getMediaFolder(): TFolder | null {
-    const p = this.settings.mediaFolderPath.trim();
-    if (!p) {
-      new Notice("Folgit: set the media folder path in settings.");
-      return null;
+  findMediaFoldersLocal(root: TFolder): TFolder[] {
+    const name = this.settings.mediaFolderName.trim();
+    if (!name) return [];
+    const out: TFolder[] = [];
+    const walk = (f: TFolder) => {
+      if (f.name === name) {
+        out.push(f);
+        return;
+      }
+      for (const child of f.children) {
+        if (child instanceof TFolder) walk(child);
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  private async findDriveMediaFolders(
+    client: DriveClient,
+    parentId: string,
+    name: string,
+    prefix: string[]
+  ): Promise<Array<{ driveId: string; segments: string[] }>> {
+    const result: Array<{ driveId: string; segments: string[] }> = [];
+    const children = await client.listChildren(parentId);
+    for (const c of children) {
+      if (c.mimeType !== FOLDER_MIME) continue;
+      const segments = [...prefix, c.name];
+      if (c.name === name) {
+        result.push({ driveId: c.id, segments });
+      } else {
+        const nested = await this.findDriveMediaFolders(client, c.id, name, segments);
+        result.push(...nested);
+      }
     }
-    const f = this.app.vault.getAbstractFileByPath(normalizePath(p));
-    if (!(f instanceof TFolder)) {
-      new Notice(`Folgit: media folder '${p}' not found in vault.`);
-      return null;
-    }
-    return f;
+    return result;
   }
 
   driveClient(): DriveClient | null {
@@ -622,51 +624,76 @@ export default class FolgitPlugin extends Plugin {
   }
 
   async uploadMedia() {
-    const folder = this.getMediaFolder();
-    if (!folder) return;
-    await this.uploadFolder(folder);
+    await this.uploadFolder(this.app.vault.getRoot());
   }
 
   async downloadMedia() {
-    const folder = this.getMediaFolder();
-    if (!folder) return;
-    await this.downloadFolder(folder);
+    await this.downloadFolder(this.app.vault.getRoot());
   }
 
-  async uploadFolder(folder: TFolder) {
+  async uploadFolder(root: TFolder) {
+    const name = this.settings.mediaFolderName.trim();
+    if (!name) {
+      new Notice("Folgit: set 'Media folder name' in settings.");
+      return;
+    }
     const client = this.driveClient();
     if (!client) return;
-    const local = this.absPath(folder);
+    const medias = this.findMediaFoldersLocal(root);
+    if (medias.length === 0) {
+      new Notice(`Folgit: no '${name}' folder found under '${root.path || "/"}'.`);
+      return;
+    }
     try {
-      new Notice(`Uploading '${folder.path || "/"}' → Google Drive…`);
-      const rootId = await this.ensureDriveFolderId(client);
-      const segments = folder.path ? folder.path.split("/").filter(Boolean) : [];
-      const targetId = await this.ensureDrivePath(client, rootId, segments);
-      const counts = { uploaded: 0, skipped: 0, folders: 0 };
-      await this.uploadTree(client, local, targetId, counts);
-      new Notice(`Uploaded: ${counts.uploaded} file(s), ${counts.skipped} unchanged.`);
+      const driveRootId = await this.ensureDriveFolderId(client);
+      const totals = { uploaded: 0, skipped: 0, folders: 0 };
+      for (const m of medias) {
+        new Notice(`Uploading '${m.path}' → Google Drive…`);
+        const segments = m.path.split("/").filter(Boolean);
+        const targetId = await this.ensureDrivePath(client, driveRootId, segments);
+        await this.uploadTree(client, this.absPath(m), targetId, totals);
+      }
+      new Notice(
+        `Uploaded ${totals.uploaded} file(s), ${totals.skipped} unchanged, across ${medias.length} '${name}' folder(s).`
+      );
     } catch (e) {
       errorNotice("upload failed", e);
     }
   }
 
-  async downloadFolder(folder: TFolder) {
+  async downloadFolder(root: TFolder) {
+    const name = this.settings.mediaFolderName.trim();
+    if (!name) {
+      new Notice("Folgit: set 'Media folder name' in settings.");
+      return;
+    }
     const client = this.driveClient();
     if (!client) return;
-    const local = this.absPath(folder);
     try {
-      await fs.mkdir(local, { recursive: true });
-      new Notice(`Downloading from Google Drive → '${folder.path || "/"}'…`);
-      const rootId = await this.ensureDriveFolderId(client);
-      const segments = folder.path ? folder.path.split("/").filter(Boolean) : [];
-      const targetId = await this.findDrivePath(client, rootId, segments);
-      if (!targetId) {
-        new Notice(`Folgit: '${folder.path}' not found on Google Drive — nothing to download.`);
+      const driveRootId = await this.ensureDriveFolderId(client);
+      const rootSegments = root.path ? root.path.split("/").filter(Boolean) : [];
+      const startId = await this.findDrivePath(client, driveRootId, rootSegments);
+      if (!startId) {
+        new Notice(`Folgit: '${root.path || "/"}' not found on Google Drive — nothing to download.`);
         return;
       }
-      const counts = { downloaded: 0, skipped: 0 };
-      await this.downloadTree(client, targetId, local, counts);
-      new Notice(`Downloaded: ${counts.downloaded} file(s), ${counts.skipped} unchanged.`);
+      const found = await this.findDriveMediaFolders(client, startId, name, []);
+      if (found.length === 0) {
+        new Notice(`Folgit: no '${name}' folder on Drive under '${root.path || "/"}'.`);
+        return;
+      }
+      const totals = { downloaded: 0, skipped: 0 };
+      const base = this.absPath(root);
+      for (const m of found) {
+        const localDir = path.join(base, ...m.segments);
+        await fs.mkdir(localDir, { recursive: true });
+        const displayPath = [root.path, ...m.segments].filter(Boolean).join("/");
+        new Notice(`Downloading Drive → '${displayPath}'…`);
+        await this.downloadTree(client, m.driveId, localDir, totals);
+      }
+      new Notice(
+        `Downloaded ${totals.downloaded} file(s), ${totals.skipped} unchanged, across ${found.length} '${name}' folder(s).`
+      );
     } catch (e) {
       errorNotice("download failed", e);
     }
@@ -1036,14 +1063,14 @@ class FolgitSettingTab extends PluginSettingTab {
     );
 
     new Setting(containerEl)
-      .setName("Media folder")
-      .setDesc("Vault-relative path of the folder to sync with Google Drive (e.g. 'media').")
+      .setName("Media folder name")
+      .setDesc("Folder basename to sync with Drive. Any folder with this name (direct or nested) gets uploaded/downloaded; everything else is left alone.")
       .addText((t) =>
         t
           .setPlaceholder("media")
-          .setValue(this.plugin.settings.mediaFolderPath)
+          .setValue(this.plugin.settings.mediaFolderName)
           .onChange(async (v) => {
-            this.plugin.settings.mediaFolderPath = v;
+            this.plugin.settings.mediaFolderName = v.trim() || "media";
             await this.plugin.saveSettings();
           })
       );

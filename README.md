@@ -16,9 +16,12 @@ Desktop only. Uses your system `git`. Google Drive is spoken directly via the Dr
 - **Status** — porcelain status in a modal.
 - **Right-click folders** — the commands show up in the folder context menu.
 
-### Google Drive (any folder)
-- **Right-click any folder → Upload / Download to Google Drive** — mirrors the folder to `<Drive root>/<vault-relative path>/`. Creates subfolders on Drive as needed. Skips files whose size already matches.
-- **Upload media folder to Google Drive** / **Download media folder from Google Drive** (command palette) — same thing but targets the path you set in *Media folder* settings, for one-keystroke sync of the folder you use most.
+### Google Drive (media folders only)
+Drive sync is scoped to folders named *media* (configurable via *Media folder name* — default `media`). Files elsewhere are never touched.
+
+- **Right-click any folder → Upload / Download to Google Drive** — walks the folder, finds every `media/` inside it (at any depth, not just direct child), and mirrors each to `<Drive root>/<vault-relative path>/`. Skips files whose size already matches.
+- **Upload media folder to Google Drive** / **Download media folder from Google Drive** (command palette) — same thing but walks the entire vault.
+- **Sync push / Sync pull** — include these uploads/downloads after their git step.
 
 Drive sync is intended for large binaries (images, audio, video) that you don't want in Git. Designate one folder (e.g. `media/`) as your Drive-backed folder and keep everything else in Git. Folgit uses the `drive.file` OAuth scope — it can only see files it creates, never the rest of your Drive.
 
@@ -31,7 +34,7 @@ Drive sync is intended for large binaries (images, audio, video) that you don't 
 - Author name / email (applied as local `git config` on repos Folgit touches)
 
 **Google Drive**
-- Media folder — vault-relative path of the folder to sync (e.g. `media`)
+- Media folder name — folder basename to sync (default `media`); every folder with this name gets synced, regardless of depth
 - Google OAuth client ID & client secret — from a "Desktop app" OAuth 2.0 client in Google Cloud Console
 - Drive folder name — the folder Folgit creates in the root of your Drive on first upload (defaults to `Obsidian Media`)
 - Authorize / Sign out buttons
