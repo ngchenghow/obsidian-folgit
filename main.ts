@@ -821,7 +821,12 @@ function guessMime(name: string): string {
 }
 
 function errorNotice(prefix: string, e: unknown) {
-  const msg = e instanceof Error ? e.message : String(e);
+  const raw = e instanceof Error ? e.message : String(e);
+  // isomorphic-git can surface very large error payloads (pack dumps, object
+  // bodies); clipping keeps Obsidian Mobile's WebView happy and the Notice
+  // readable. Full error still goes to the console for debugging.
+  const msg = raw.length > 400 ? raw.slice(0, 400) + "…" : raw;
+  console.error(`[folgit] ${prefix}`, e);
   new Notice(`Folgit: ${prefix} — ${msg}`, 8000);
 }
 

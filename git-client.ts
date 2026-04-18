@@ -121,16 +121,44 @@ export class GitClient {
     if (!branch) {
       throw new Error("Cannot pull with a detached HEAD — check out a branch first.");
     }
-    await git.pull({
+    // Explicit fetch + fast-forward instead of git.pull, which has internal
+    // logic that can fall back to looking for 'master' even when ref and
+    // remoteRef are provided. This matches `git fetch origin <branch> &&
+    // git merge --ff-only origin/<branch>`.
+    await git.fetch({
       fs: this.fs,
       http,
       dir,
+      remote: "origin",
       ref: branch,
       remoteRef: branch,
-      fastForward: true,
       singleBranch: true,
+      tags: false,
       onAuth: this.auth,
-      author: this.author(),
+    });
+    try {
+      await git.merge({
+        fs: this.fs,
+        dir,
+        ours: branch,
+        theirs: `refs/remotes/origin/${branch}`,
+        fastForwardOnly: true,
+        author: this.author(),
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/not.*fast.*forward|NotFastForward/i.test(msg)) {
+        throw new Error(
+          `Local '${branch}' has diverged from origin/${branch}. Commit or reset, then retry.`
+        );
+      }
+      throw e;
+    }
+    await git.checkout({
+      fs: this.fs,
+      dir,
+      ref: branch,
+      force: false,
     });
   }
 
