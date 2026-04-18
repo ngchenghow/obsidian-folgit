@@ -43,6 +43,10 @@ const ctx = await esbuild.context({
     "isomorphic-git": isoGitEsm,
     buffer: bufferShim,
   },
+  // Install Buffer on globalThis at bundle start — isomorphic-git / sha.js
+  // reference the bare `Buffer` global on some code paths, and Obsidian
+  // Mobile has no Node to provide it.
+  inject: [resolve(__dirname, "buffer-shim.js")],
   mainFields: ["browser", "module", "main"],
   conditions: ["browser", "import"],
   format: "cjs",
