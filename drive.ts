@@ -1,5 +1,17 @@
-import { requestUrl } from "obsidian";
-import * as http from "http";
+import { Platform, requestUrl } from "obsidian";
+
+type NodeHttp = typeof import("http");
+
+function loadHttp(): NodeHttp | null {
+  if (!Platform.isDesktop) return null;
+  try {
+    const req = (globalThis as unknown as { require?: (s: string) => unknown }).require;
+    if (typeof req !== "function") return null;
+    return req("http") as NodeHttp;
+  } catch {
+    return null;
+  }
+}
 
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -24,6 +36,11 @@ export interface DriveFile {
 }
 
 export async function runOAuth(clientId: string, clientSecret: string): Promise<DriveTokens> {
+  if (!Platform.isDesktop) {
+    throw new Error(
+      "Google Drive authorization requires desktop (uses a loopback HTTP server). Authorize on desktop; the token syncs via the vault."
+    );
+  }
   const { port, codePromise, close } = await startLoopbackServer();
   const redirectUri = `http://127.0.0.1:${port}/`;
   const state = Math.random().toString(36).slice(2);
@@ -80,6 +97,11 @@ function startLoopbackServer(): Promise<{
   close: () => void;
 }> {
   return new Promise((resolve, reject) => {
+    const http = loadHttp();
+    if (!http) {
+      reject(new Error("Node http module unavailable — loopback OAuth requires desktop."));
+      return;
+    }
     const server = http.createServer();
     let resolveCode!: (v: { code: string; state: string }) => void;
     let rejectCode!: (e: Error) => void;
