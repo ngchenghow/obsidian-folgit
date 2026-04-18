@@ -117,12 +117,18 @@ export class GitClient {
   }
 
   async pullFastForward(dir: string): Promise<void> {
+    const branch = await this.currentBranch(dir);
+    if (!branch) {
+      throw new Error("Cannot pull with a detached HEAD — check out a branch first.");
+    }
     await git.pull({
       fs: this.fs,
       http,
       dir,
+      ref: branch,
+      remoteRef: branch,
       fastForward: true,
-      singleBranch: false,
+      singleBranch: true,
       onAuth: this.auth,
       author: this.author(),
     });
