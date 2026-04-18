@@ -47,15 +47,23 @@ export class GitClient {
   }
 
   async clone(dir: string, url: string, onMessage?: (m: string) => void): Promise<void> {
+    console.log(`[folgit] clone start dir=${dir} url=${url}`);
     await git.clone({
       fs: this.fs,
       http,
       dir,
       url,
-      singleBranch: false,
+      singleBranch: true,
       onAuth: this.auth,
-      onMessage: onMessage ? (m: string) => onMessage(m) : undefined,
+      onMessage: (m: string) => {
+        console.log(`[folgit] clone msg:`, m);
+        onMessage?.(m);
+      },
+      onProgress: (p) => {
+        if (p.phase) console.log(`[folgit] clone progress:`, p.phase, p.loaded, "/", p.total);
+      },
     });
+    console.log(`[folgit] clone done dir=${dir}`);
   }
 
   async addRemote(dir: string, remote: string, url: string): Promise<void> {
@@ -121,29 +129,20 @@ export class GitClient {
     if (!branch) {
       throw new Error("Cannot pull with a detached HEAD — check out a branch first.");
     }
-    // Explicit fetch + fast-forward instead of git.pull, which has internal
-    // logic that can fall back to looking for 'master' even when ref and
-    // remoteRef are provided. This matches `git fetch origin <branch> &&
-    // git merge --ff-only origin/<branch>`.
-    await git.fetch({
-      fs: this.fs,
-      http,
-      dir,
-      remote: "origin",
-      ref: branch,
-      remoteRef: branch,
-      singleBranch: true,
-      tags: false,
-      onAuth: this.auth,
-    });
+    console.log(`[folgit] fastForward dir=${dir} branch=${branch}`);
+    // git.fastForward is purpose-built for `git pull --ff-only` and internally
+    // handles the fetch + ref resolution without the "master" fallback quirk
+    // that git.pull has.
     try {
-      await git.merge({
+      await git.fastForward({
         fs: this.fs,
+        http,
         dir,
-        ours: branch,
-        theirs: `refs/remotes/origin/${branch}`,
-        fastForwardOnly: true,
-        author: this.author(),
+        ref: branch,
+        remoteRef: branch,
+        remote: "origin",
+        singleBranch: true,
+        onAuth: this.auth,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -154,12 +153,6 @@ export class GitClient {
       }
       throw e;
     }
-    await git.checkout({
-      fs: this.fs,
-      dir,
-      ref: branch,
-      force: false,
-    });
   }
 
   async status(dir: string): Promise<string> {
