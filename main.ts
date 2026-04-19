@@ -24,6 +24,7 @@ interface FolgitSettings {
   authorEmail: string;
   commitName: string;
   githubToken: string;
+  cloneDepth: number;
   mediaFolderName: string;
   driveClientId: string;
   driveClientSecret: string;
@@ -41,6 +42,7 @@ const DEFAULT_SETTINGS: FolgitSettings = {
   authorEmail: "",
   commitName: "",
   githubToken: "",
+  cloneDepth: 1,
   mediaFolderName: "media",
   driveClientId: "",
   driveClientSecret: "",
@@ -449,8 +451,13 @@ export default class FolgitPlugin extends Plugin {
       }
       if (parent) await mkdirVault(adapter, parent);
       await adapter.mkdir(rel);
-      new Notice(`Cloning into '${rel}'…`);
-      await this.git.clone(rel, url, (m) => console.log("[folgit clone]", m));
+      const depth = Math.max(0, Math.floor(this.settings.cloneDepth || 0));
+      new Notice(
+        depth > 0
+          ? `Cloning into '${rel}' (shallow, depth ${depth})…`
+          : `Cloning into '${rel}' (full history)…`
+      );
+      await this.git.clone(rel, url, { depth: depth > 0 ? depth : undefined });
       new Notice(`Cloned '${rel}'.`);
     } catch (e) {
       errorNotice("clone failed", e);
@@ -992,6 +999,22 @@ class FolgitSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+
+    new Setting(containerEl)
+      .setName("Clone depth")
+      .setDesc(
+        "How many recent commits to fetch when cloning. 1 = latest commit only (shallow — fastest, uses the least memory, recommended on mobile where large repos can OOM). 0 = full history (desktop only). Subsequent pulls add new commits on top."
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder("1")
+          .setValue(String(this.plugin.settings.cloneDepth))
+          .onChange(async (v) => {
+            const n = parseInt(v, 10);
+            this.plugin.settings.cloneDepth = isNaN(n) || n < 0 ? 1 : n;
+            await this.plugin.saveSettings();
+          })
+      );
 
     containerEl.createEl("h3", { text: "Google Drive (media folder)" });
     const howto = containerEl.createEl("p", { cls: "setting-item-description" });

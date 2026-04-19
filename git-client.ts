@@ -46,14 +46,22 @@ export class GitClient {
     await git.init({ fs: this.fs, dir, defaultBranch });
   }
 
-  async clone(dir: string, url: string, onMessage?: (m: string) => void): Promise<void> {
-    console.log(`[folgit] clone start dir=${dir} url=${url}`);
+  async clone(
+    dir: string,
+    url: string,
+    opts: { depth?: number; onMessage?: (m: string) => void } = {}
+  ): Promise<void> {
+    const { depth, onMessage } = opts;
+    console.log(`[folgit] clone start dir=${dir} url=${url} depth=${depth ?? "full"}`);
     await git.clone({
       fs: this.fs,
       http,
       dir,
       url,
       singleBranch: true,
+      // depth > 0 means shallow clone (only last N commits). Drastically
+      // reduces memory + bandwidth for mobile. Omit for full history.
+      ...(depth && depth > 0 ? { depth } : {}),
       onAuth: this.auth,
       onMessage: (m: string) => {
         console.log(`[folgit] clone msg:`, m);
