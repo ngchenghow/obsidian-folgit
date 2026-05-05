@@ -122,12 +122,14 @@ export class GitClient {
   }
 
   async push(dir: string, ref?: string): Promise<void> {
+    console.log(`[folgit] push dir=${dir} ref=${ref ?? "(current)"} force=true`);
     await git.push({
       fs: this.fs,
       http,
       dir,
       remote: "origin",
       ref,
+      force: true,
       onAuth: this.auth,
     });
   }
