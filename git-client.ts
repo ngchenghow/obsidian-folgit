@@ -121,13 +121,31 @@ export class GitClient {
     });
   }
 
-  async push(dir: string, ref?: string): Promise<void> {
+  async push(dir: string, ref?: string, opts: { force?: boolean } = {}): Promise<void> {
     const branch = ref ?? (await this.currentBranch(dir));
     if (!branch) {
       throw new Error("Cannot push with a detached HEAD — check out a branch first.");
     }
-    console.log(`[folgit] push dir=${dir} branch=${branch}`);
+    const force = !!opts.force;
+    console.log(`[folgit] push dir=${dir} branch=${branch} force=${force}`);
 
+    // Force push: skip fetch+merge entirely and overwrite the remote ref.
+    // Caller is responsible for understanding this can erase commits from
+    // other devices that haven't been pulled.
+    if (force) {
+      await git.push({
+        fs: this.fs,
+        http,
+        dir,
+        remote: "origin",
+        ref: branch,
+        force: true,
+        onAuth: this.auth,
+      });
+      return;
+    }
+
+    // Safe path: fetch + auto-merge + plain push.
     // Step 1: fetch the remote branch so we can merge any new commits in
     // before pushing. If the remote doesn't have this branch yet (first
     // push), we skip the merge entirely.
@@ -172,7 +190,8 @@ export class GitClient {
         if (/MergeConflict|conflict/i.test(msg)) {
           throw new Error(
             `Push aborted: merge conflict between local '${branch}' and origin/${branch}. ` +
-              `Resolve the conflicts manually, commit, then push again.`
+              `Resolve the conflicts manually, commit, then push again. ` +
+              `Or enable 'Force push' in Folgit settings to overwrite the remote (loses other devices' commits).`
           );
         }
         throw e;

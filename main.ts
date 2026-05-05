@@ -24,6 +24,7 @@ interface FolgitSettings {
   authorEmail: string;
   commitName: string;
   githubToken: string;
+  forcePush: boolean;
   cloneDepth: number;
   mediaFolderName: string;
   driveClientId: string;
@@ -42,6 +43,7 @@ const DEFAULT_SETTINGS: FolgitSettings = {
   authorEmail: "",
   commitName: "",
   githubToken: "",
+  forcePush: false,
   cloneDepth: 1,
   mediaFolderName: "media",
   driveClientId: "",
@@ -325,9 +327,10 @@ export default class FolgitPlugin extends Plugin {
     }
     try {
       const branch = (await this.git.currentBranch(folder.path)) ?? this.settings.defaultBranch;
-      new Notice(`Pushing ${branch}…`);
-      await this.git.push(folder.path, branch);
-      new Notice(`Pushed ${branch}.`);
+      const force = this.settings.forcePush;
+      new Notice(force ? `Force-pushing ${branch}…` : `Pushing ${branch}…`);
+      await this.git.push(folder.path, branch, { force });
+      new Notice(force ? `Force-pushed ${branch}.` : `Pushed ${branch}.`);
     } catch (e) {
       errorNotice("push failed", e);
     }
@@ -363,9 +366,10 @@ export default class FolgitPlugin extends Plugin {
         new Notice("No local changes to commit.");
       }
       const branch = (await this.git.currentBranch(folder.path)) ?? this.settings.defaultBranch;
-      new Notice(`Pushing ${branch}…`);
-      await this.git.push(folder.path, branch);
-      new Notice(`Pushed ${branch}.`);
+      const force = this.settings.forcePush;
+      new Notice(force ? `Force-pushing ${branch}…` : `Pushing ${branch}…`);
+      await this.git.push(folder.path, branch, { force });
+      new Notice(force ? `Force-pushed ${branch}.` : `Pushed ${branch}.`);
     } catch (e) {
       errorNotice("sync push (git) failed", e);
     }
@@ -999,6 +1003,18 @@ class FolgitSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+
+    new Setting(containerEl)
+      .setName("Force push")
+      .setDesc(
+        "Off (default): push fetches the remote and auto-merges new commits before pushing — safe with multiple devices, never loses work, but stops on conflicts. On: push uses --force and overwrites the remote ref. Faster, always succeeds, but can erase commits another device pushed since your last pull."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.forcePush).onChange(async (v) => {
+          this.plugin.settings.forcePush = v;
+          await this.plugin.saveSettings();
+        })
+      );
 
     new Setting(containerEl)
       .setName("Clone depth")
