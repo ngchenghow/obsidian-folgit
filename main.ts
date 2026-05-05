@@ -24,7 +24,6 @@ interface FolgitSettings {
   authorEmail: string;
   commitName: string;
   githubToken: string;
-  forcePush: boolean;
   cloneDepth: number;
   mediaFolderName: string;
   driveClientId: string;
@@ -43,7 +42,6 @@ const DEFAULT_SETTINGS: FolgitSettings = {
   authorEmail: "",
   commitName: "",
   githubToken: "",
-  forcePush: false,
   cloneDepth: 1,
   mediaFolderName: "media",
   driveClientId: "",
@@ -106,6 +104,13 @@ export default class FolgitPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "force-push-folder",
+      name: "Force push folder repo (overwrites remote)",
+      callback: () =>
+        this.pickRepoFolder("Select repo folder to force push", (f) => this.push(f, { force: true })),
+    });
+
+    this.addCommand({
       id: "pull-folder",
       name: "Pull folder repo",
       callback: () => this.pickRepoFolder("Select repo folder to pull", (f) => this.pull(f)),
@@ -121,6 +126,15 @@ export default class FolgitPlugin extends Plugin {
       id: "sync-push",
       name: "Sync push (commit, push, upload media to Drive)",
       callback: () => this.pickRepoFolder("Select repo folder to sync push", (f) => this.syncPush(f)),
+    });
+
+    this.addCommand({
+      id: "sync-force-push",
+      name: "Sync force push (commit, force-push, upload media)",
+      callback: () =>
+        this.pickRepoFolder("Select repo folder to sync force push", (f) =>
+          this.syncPush(f, { force: true })
+        ),
     });
 
     this.addCommand({
@@ -189,6 +203,12 @@ export default class FolgitPlugin extends Plugin {
         );
         menu.addItem((item) =>
           item
+            .setTitle("Folgit: Force push")
+            .setIcon("upload")
+            .onClick(() => this.push(file, { force: true }))
+        );
+        menu.addItem((item) =>
+          item
             .setTitle("Folgit: Pull")
             .setIcon("download")
             .onClick(() => this.pull(file))
@@ -199,6 +219,12 @@ export default class FolgitPlugin extends Plugin {
             .setTitle("Folgit: Sync push")
             .setIcon("arrow-up-circle")
             .onClick(() => this.syncPush(file))
+        );
+        menu.addItem((item) =>
+          item
+            .setTitle("Folgit: Sync force push")
+            .setIcon("arrow-up-circle")
+            .onClick(() => this.syncPush(file, { force: true }))
         );
         menu.addItem((item) =>
           item
@@ -320,19 +346,19 @@ export default class FolgitPlugin extends Plugin {
     }
   }
 
-  async push(folder: TFolder) {
+  async push(folder: TFolder, opts: { force?: boolean } = {}) {
     if (!(await this.git.isRepo(folder.path))) {
       new Notice(`'${folder.path}' is not a Git repo.`);
       return;
     }
     try {
       const branch = (await this.git.currentBranch(folder.path)) ?? this.settings.defaultBranch;
-      const force = this.settings.forcePush;
+      const force = !!opts.force;
       new Notice(force ? `Force-pushing ${branch}…` : `Pushing ${branch}…`);
       await this.git.push(folder.path, branch, { force });
       new Notice(force ? `Force-pushed ${branch}.` : `Pushed ${branch}.`);
     } catch (e) {
-      errorNotice("push failed", e);
+      errorNotice(opts.force ? "force push failed" : "push failed", e);
     }
   }
 
@@ -350,11 +376,12 @@ export default class FolgitPlugin extends Plugin {
     }
   }
 
-  async syncPush(folder: TFolder) {
+  async syncPush(folder: TFolder, opts: { force?: boolean } = {}) {
     if (!(await this.git.isRepo(folder.path))) {
       new Notice(`'${folder.path}' is not a Git repo.`);
       return;
     }
+    const force = !!opts.force;
     try {
       const staged = await this.git.addAll(folder.path);
       if (staged > 0) {
@@ -366,12 +393,11 @@ export default class FolgitPlugin extends Plugin {
         new Notice("No local changes to commit.");
       }
       const branch = (await this.git.currentBranch(folder.path)) ?? this.settings.defaultBranch;
-      const force = this.settings.forcePush;
       new Notice(force ? `Force-pushing ${branch}…` : `Pushing ${branch}…`);
       await this.git.push(folder.path, branch, { force });
       new Notice(force ? `Force-pushed ${branch}.` : `Pushed ${branch}.`);
     } catch (e) {
-      errorNotice("sync push (git) failed", e);
+      errorNotice(force ? "sync force push (git) failed" : "sync push (git) failed", e);
     }
 
     if (this.settings.driveRefreshToken) {
@@ -1003,18 +1029,6 @@ class FolgitSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
-
-    new Setting(containerEl)
-      .setName("Force push")
-      .setDesc(
-        "Off (default): push fetches the remote and auto-merges new commits before pushing — safe with multiple devices, never loses work, but stops on conflicts. On: push uses --force and overwrites the remote ref. Faster, always succeeds, but can erase commits another device pushed since your last pull."
-      )
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.forcePush).onChange(async (v) => {
-          this.plugin.settings.forcePush = v;
-          await this.plugin.saveSettings();
-        })
-      );
 
     new Setting(containerEl)
       .setName("Clone depth")

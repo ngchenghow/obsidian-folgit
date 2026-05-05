@@ -191,7 +191,7 @@ export class GitClient {
           throw new Error(
             `Push aborted: merge conflict between local '${branch}' and origin/${branch}. ` +
               `Resolve the conflicts manually, commit, then push again. ` +
-              `Or enable 'Force push' in Folgit settings to overwrite the remote (loses other devices' commits).`
+              `Or use 'Folgit: Force push' to overwrite the remote (loses other devices' commits).`
           );
         }
         throw e;
