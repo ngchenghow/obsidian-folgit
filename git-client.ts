@@ -122,14 +122,71 @@ export class GitClient {
   }
 
   async push(dir: string, ref?: string): Promise<void> {
-    console.log(`[folgit] push dir=${dir} ref=${ref ?? "(current)"} force=true`);
+    const branch = ref ?? (await this.currentBranch(dir));
+    if (!branch) {
+      throw new Error("Cannot push with a detached HEAD — check out a branch first.");
+    }
+    console.log(`[folgit] push dir=${dir} branch=${branch}`);
+
+    // Step 1: fetch the remote branch so we can merge any new commits in
+    // before pushing. If the remote doesn't have this branch yet (first
+    // push), we skip the merge entirely.
+    let remoteHasBranch = true;
+    try {
+      await git.fetch({
+        fs: this.fs,
+        http,
+        dir,
+        remote: "origin",
+        ref: branch,
+        remoteRef: branch,
+        singleBranch: true,
+        tags: false,
+        onAuth: this.auth,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/NotFound|Could not find|not.*found.*remote|Reference.*does not exist/i.test(msg)) {
+        console.log(`[folgit] push: remote has no '${branch}' yet — first push`);
+        remoteHasBranch = false;
+      } else {
+        throw e;
+      }
+    }
+
+    // Step 2: merge origin/<branch> into local <branch>. isomorphic-git's
+    // merge fast-forwards when possible and creates a merge commit otherwise;
+    // it throws MergeConflictError when both sides edited the same lines.
+    if (remoteHasBranch) {
+      try {
+        await git.merge({
+          fs: this.fs,
+          dir,
+          ours: branch,
+          theirs: `refs/remotes/origin/${branch}`,
+          author: this.author(),
+        });
+        await git.checkout({ fs: this.fs, dir, ref: branch, force: false });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/MergeConflict|conflict/i.test(msg)) {
+          throw new Error(
+            `Push aborted: merge conflict between local '${branch}' and origin/${branch}. ` +
+              `Resolve the conflicts manually, commit, then push again.`
+          );
+        }
+        throw e;
+      }
+    }
+
+    // Step 3: regular (non-force) push. Should always be a fast-forward now
+    // because we just merged origin/<branch> into local.
     await git.push({
       fs: this.fs,
       http,
       dir,
       remote: "origin",
-      ref,
-      force: true,
+      ref: branch,
       onAuth: this.auth,
     });
   }
