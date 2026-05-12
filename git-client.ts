@@ -1,4 +1,4 @@
-import git from "isomorphic-git";
+import git, { PushResult } from "isomorphic-git";
 import { VaultFs } from "./vault-fs";
 import { http } from "./iso-http";
 
@@ -133,7 +133,7 @@ export class GitClient {
     // Caller is responsible for understanding this can erase commits from
     // other devices that haven't been pulled.
     if (force) {
-      await git.push({
+      const result = await git.push({
         fs: this.fs,
         http,
         dir,
@@ -142,6 +142,7 @@ export class GitClient {
         force: true,
         onAuth: this.auth,
       });
+      this.assertPushOk(result, branch);
       return;
     }
 
@@ -200,7 +201,7 @@ export class GitClient {
 
     // Step 3: regular (non-force) push. Should always be a fast-forward now
     // because we just merged origin/<branch> into local.
-    await git.push({
+    const result = await git.push({
       fs: this.fs,
       http,
       dir,
@@ -208,6 +209,40 @@ export class GitClient {
       ref: branch,
       onAuth: this.auth,
     });
+    this.assertPushOk(result, branch);
+  }
+
+  /**
+   * isomorphic-git's git.push RESOLVES with a result object even when the
+   * server rejected the push — it does not throw. We need to inspect the
+   * result and turn failures into thrown errors so the caller can surface
+   * them (otherwise the UI happily reports "Pushed" on a no-op).
+   */
+  private assertPushOk(result: PushResult, branch: string): void {
+    console.log(`[folgit] push result:`, JSON.stringify(result));
+    if (result.ok && !result.error) {
+      // Per-ref check: some servers return ok=true at the top level but
+      // reject individual refs.
+      const refs = result.refs ?? {};
+      const failedRef = Object.entries(refs).find(([, s]) => s && s.ok === false);
+      if (!failedRef) return;
+      const [refName, status] = failedRef;
+      throw new Error(`Server rejected ${refName}: ${status.error || "unknown error"}`);
+    }
+    if (result.error) {
+      throw new Error(`Push rejected by server: ${result.error}`);
+    }
+    // ok is false but error is null — surface what we can.
+    const refs = result.refs ?? {};
+    const details = Object.entries(refs)
+      .filter(([, s]) => s && s.ok === false)
+      .map(([r, s]) => `${r}: ${s.error || "rejected"}`)
+      .join("; ");
+    throw new Error(
+      details
+        ? `Push rejected: ${details}`
+        : `Push to origin/${branch} did not complete (no refs updated).`
+    );
   }
 
   async pullFastForward(dir: string): Promise<void> {
