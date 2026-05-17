@@ -1,30 +1,31 @@
 import {
   App,
-  DataAdapter,
   FuzzySuggestModal,
   Modal,
   Notice,
-  Platform,
   Plugin,
   PluginSettingTab,
   Setting,
   TAbstractFile,
-  TFile,
   TFolder,
   normalizePath,
 } from "obsidian";
+import { exec } from "child_process";
+import { promisify } from "util";
+import * as path from "path";
+import * as fs from "fs/promises";
 import { DriveClient, DriveFile, DriveTokens, FOLDER_MIME, runOAuth } from "./drive";
-import { GitClient } from "./git-client";
-import { VaultFs } from "./vault-fs";
+
+const execAsync = promisify(exec);
 
 interface FolgitSettings {
+  gitPath: string;
   defaultBranch: string;
   defaultCommitMessage: string;
   authorName: string;
   authorEmail: string;
   commitName: string;
   githubToken: string;
-  cloneDepth: number;
   mediaFolderName: string;
   driveClientId: string;
   driveClientSecret: string;
@@ -36,13 +37,13 @@ interface FolgitSettings {
 }
 
 const DEFAULT_SETTINGS: FolgitSettings = {
+  gitPath: "git",
   defaultBranch: "main",
   defaultCommitMessage: "Update from Obsidian",
   authorName: "",
   authorEmail: "",
   commitName: "",
   githubToken: "",
-  cloneDepth: 1,
   mediaFolderName: "media",
   driveClientId: "",
   driveClientSecret: "",
@@ -53,23 +54,16 @@ const DEFAULT_SETTINGS: FolgitSettings = {
   driveExpiresAt: 0,
 };
 
+interface GitResult {
+  stdout: string;
+  stderr: string;
+}
+
 export default class FolgitPlugin extends Plugin {
   settings!: FolgitSettings;
-  private vfs!: VaultFs;
-  private git!: GitClient;
 
   async onload() {
     await this.loadSettings();
-
-    this.vfs = new VaultFs(this.app.vault.adapter);
-    this.git = new GitClient(
-      this.vfs,
-      () => this.settings.githubToken.trim(),
-      () => ({
-        name: this.settings.authorName.trim(),
-        email: this.settings.authorEmail.trim(),
-      })
-    );
 
     this.addSettingTab(new FolgitSettingTab(this.app, this));
 
@@ -259,17 +253,64 @@ export default class FolgitPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  private adapter(): DataAdapter {
-    return this.app.vault.adapter;
+  vaultRoot(): string {
+    const adapter = this.app.vault.adapter as unknown as { basePath?: string; getBasePath?: () => string };
+    if (typeof adapter.getBasePath === "function") return adapter.getBasePath();
+    if (typeof adapter.basePath === "string") return adapter.basePath;
+    throw new Error("Could not resolve vault base path — desktop only.");
+  }
+
+  absPath(folder: TFolder | string): string {
+    const rel = typeof folder === "string" ? folder : folder.path;
+    return path.join(this.vaultRoot(), rel);
+  }
+
+  async git(cwd: string, args: string): Promise<GitResult> {
+    const cmd = `${quote(this.settings.gitPath)}${this.githubAuthFlags()} ${args}`;
+    try {
+      const { stdout, stderr } = await execAsync(cmd, { cwd, windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
+      return { stdout, stderr };
+    } catch (e: unknown) {
+      const err = e as { stdout?: string; stderr?: string; message?: string };
+      throw new Error(err.stderr?.trim() || err.stdout?.trim() || err.message || "git failed");
+    }
+  }
+
+  private githubAuthFlags(): string {
+    const token = this.settings.githubToken.trim();
+    if (!token) return "";
+    const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
+    return ` -c ${quote(`http.https://github.com/.extraheader=Authorization: Basic ${basic}`)}`;
+  }
+
+  async isRepo(folder: TFolder | string): Promise<boolean> {
+    const dir = this.absPath(folder);
+    try {
+      const stat = await fs.stat(path.join(dir, ".git"));
+      return stat.isDirectory() || stat.isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  async ensureIdentity(cwd: string) {
+    if (this.settings.authorName) {
+      await this.git(cwd, `config user.name ${quote(this.settings.authorName)}`);
+    }
+    if (this.settings.authorEmail) {
+      await this.git(cwd, `config user.email ${quote(this.settings.authorEmail)}`);
+    }
   }
 
   async initRepo(folder: TFolder) {
-    if (await this.git.isRepo(folder.path)) {
+    const dir = this.absPath(folder);
+    if (await this.isRepo(folder)) {
       new Notice(`'${folder.path}' is already a Git repo.`);
       return;
     }
     try {
-      await this.git.init(folder.path, this.settings.defaultBranch);
+      await this.git(dir, `init -b ${quote(this.settings.defaultBranch)}`);
+      await this.ensureIdentity(dir);
       const added = await this.ensureMediaIgnored(folder);
       new Notice(
         added
@@ -285,11 +326,12 @@ export default class FolgitPlugin extends Plugin {
     const name = this.settings.mediaFolderName.trim();
     if (!name) return false;
 
-    const gitignorePath = repo.path ? `${repo.path}/.gitignore` : ".gitignore";
-    const adapter = this.adapter();
+    const gitignorePath = path.join(this.absPath(repo), ".gitignore");
     let content = "";
-    if (await adapter.exists(gitignorePath)) {
-      content = await adapter.read(gitignorePath);
+    try {
+      content = await fs.readFile(gitignorePath, "utf8");
+    } catch {
+      // no existing file
     }
     const entry = `${name}/`;
     const existing = new Set(
@@ -300,18 +342,24 @@ export default class FolgitPlugin extends Plugin {
 
     const sep = content && !content.endsWith("\n") ? "\n" : "";
     const block = `${sep}# Folgit: '${name}' folders are synced via Google Drive\n${entry}\n`;
-    await adapter.write(gitignorePath, content + block);
+    await fs.writeFile(gitignorePath, content + block);
     return true;
   }
 
   async promptRemote(folder: TFolder) {
+    const dir = this.absPath(folder);
     new PromptModal(this.app, {
       title: "Remote URL",
       placeholder: "https://github.com/user/repo.git",
       submit: async (url) => {
         if (!url) return;
         try {
-          await this.git.addRemote(folder.path, "origin", url);
+          try {
+            await this.git(dir, `remote remove origin`);
+          } catch {
+            // no existing remote, fine
+          }
+          await this.git(dir, `remote add origin ${quote(url)}`);
           new Notice(`Set origin to ${url}.`);
         } catch (e) {
           errorNotice("set remote failed", e);
@@ -321,7 +369,7 @@ export default class FolgitPlugin extends Plugin {
   }
 
   async promptCommit(folder: TFolder) {
-    if (!(await this.git.isRepo(folder.path))) {
+    if (!(await this.isRepo(folder))) {
       new Notice(`'${folder.path}' is not a Git repo. Init it first.`);
       return;
     }
@@ -333,69 +381,107 @@ export default class FolgitPlugin extends Plugin {
   }
 
   async commit(folder: TFolder, message: string) {
+    const dir = this.absPath(folder);
     try {
-      const staged = await this.git.addAll(folder.path);
-      if (staged === 0) {
+      await this.ensureIdentity(dir);
+      await this.git(dir, `add -A`);
+      const status = await this.git(dir, `status --porcelain`);
+      if (!status.stdout.trim()) {
         new Notice("Nothing to commit.");
         return;
       }
-      const sha = await this.git.commit(folder.path, message);
-      new Notice(`Committed '${folder.path}' (${sha.slice(0, 7)}).`);
+      await this.git(dir, `commit -m ${quote(message)}`);
+      new Notice(`Committed '${folder.path}'.`);
     } catch (e) {
       errorNotice("commit failed", e);
     }
   }
 
   async push(folder: TFolder, opts: { force?: boolean } = {}) {
-    if (!(await this.git.isRepo(folder.path))) {
+    if (!(await this.isRepo(folder))) {
       new Notice(`'${folder.path}' is not a Git repo.`);
       return;
     }
+    const dir = this.absPath(folder);
+    const force = !!opts.force;
     try {
-      const branch = (await this.git.currentBranch(folder.path)) ?? this.settings.defaultBranch;
-      const force = !!opts.force;
+      const branch =
+        (await this.git(dir, `rev-parse --abbrev-ref HEAD`)).stdout.trim() || this.settings.defaultBranch;
+      if (!force) {
+        // Auto-merge any remote commits before pushing so the push is always
+        // a fast-forward. `git pull --no-rebase` defaults to creating a merge
+        // commit when local and remote both have new work.
+        try {
+          new Notice(`Fetching origin/${branch}…`);
+          await this.git(dir, `pull --no-rebase origin ${quote(branch)}`);
+        } catch (e) {
+          // No upstream / branch not on remote yet → first push; ignore.
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!/couldn't find remote ref|no such ref|no tracking information|does not appear to be a git/i.test(msg)) {
+            throw e;
+          }
+        }
+      }
       new Notice(force ? `Force-pushing ${branch}…` : `Pushing ${branch}…`);
-      await this.git.push(folder.path, branch, { force });
-      new Notice(force ? `Force-pushed ${branch}.` : `Pushed ${branch}.`);
+      const flag = force ? "--force" : "";
+      const out = await this.git(dir, `push -u ${flag} origin ${quote(branch)}`);
+      new Notice(`${force ? "Force-pushed" : "Pushed"}: ${summarize(out)}`);
     } catch (e) {
-      errorNotice(opts.force ? "force push failed" : "push failed", e);
+      errorNotice(force ? "force push failed" : "push failed", e);
     }
   }
 
   async pull(folder: TFolder) {
-    if (!(await this.git.isRepo(folder.path))) {
+    if (!(await this.isRepo(folder))) {
       new Notice(`'${folder.path}' is not a Git repo.`);
       return;
     }
+    const dir = this.absPath(folder);
     try {
-      new Notice("Pulling…");
-      await this.git.pullFastForward(folder.path);
-      new Notice("Pulled.");
+      new Notice(`Pulling…`);
+      const out = await this.git(dir, `pull --ff-only`);
+      new Notice(`Pulled: ${summarize(out)}`);
     } catch (e) {
       errorNotice("pull failed", e);
     }
   }
 
   async syncPush(folder: TFolder, opts: { force?: boolean } = {}) {
-    if (!(await this.git.isRepo(folder.path))) {
+    if (!(await this.isRepo(folder))) {
       new Notice(`'${folder.path}' is not a Git repo.`);
       return;
     }
+    const dir = this.absPath(folder);
     const force = !!opts.force;
     try {
-      const staged = await this.git.addAll(folder.path);
-      if (staged > 0) {
+      await this.ensureIdentity(dir);
+      await this.git(dir, `add -A`);
+      const status = await this.git(dir, `status --porcelain`);
+      if (status.stdout.trim()) {
         const name = this.settings.commitName.trim();
         const msg = name ? `${name}: Auto-sync ${timestamp()}` : `Auto-sync ${timestamp()}`;
-        await this.git.commit(folder.path, msg);
+        await this.git(dir, `commit -m ${quote(msg)}`);
         new Notice(`Committed: ${msg}`);
       } else {
         new Notice("No local changes to commit.");
       }
-      const branch = (await this.git.currentBranch(folder.path)) ?? this.settings.defaultBranch;
+      const branch =
+        (await this.git(dir, `rev-parse --abbrev-ref HEAD`)).stdout.trim() || this.settings.defaultBranch;
+      if (!force) {
+        try {
+          new Notice(`Fetching origin/${branch}…`);
+          await this.git(dir, `pull --no-rebase origin ${quote(branch)}`);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!/couldn't find remote ref|no such ref|no tracking information|does not appear to be a git/i.test(msg)) {
+            throw e;
+          }
+        }
+      }
       new Notice(force ? `Force-pushing ${branch}…` : `Pushing ${branch}…`);
-      await this.git.push(folder.path, branch, { force });
-      new Notice(force ? `Force-pushed ${branch}.` : `Pushed ${branch}.`);
+      const flag = force ? "--force" : "";
+      const out = await this.git(dir, `push -u ${flag} origin ${quote(branch)}`);
+      new Notice(`${force ? "Force-pushed" : "Pushed"}: ${summarize(out)}`);
     } catch (e) {
       errorNotice(force ? "sync force push (git) failed" : "sync push (git) failed", e);
     }
@@ -406,14 +492,15 @@ export default class FolgitPlugin extends Plugin {
   }
 
   async syncPull(folder: TFolder) {
-    if (!(await this.git.isRepo(folder.path))) {
+    if (!(await this.isRepo(folder))) {
       new Notice(`'${folder.path}' is not a Git repo.`);
       return;
     }
+    const dir = this.absPath(folder);
     try {
       new Notice("Pulling…");
-      await this.git.pullFastForward(folder.path);
-      new Notice("Pulled.");
+      const out = await this.git(dir, `pull --ff-only`);
+      new Notice(`Pulled: ${summarize(out)}`);
     } catch (e) {
       errorNotice("sync pull (git) failed", e);
     }
@@ -424,13 +511,14 @@ export default class FolgitPlugin extends Plugin {
   }
 
   async showStatus(folder: TFolder) {
-    if (!(await this.git.isRepo(folder.path))) {
+    if (!(await this.isRepo(folder))) {
       new Notice(`'${folder.path}' is not a Git repo.`);
       return;
     }
+    const dir = this.absPath(folder);
     try {
-      const out = await this.git.status(folder.path);
-      new InfoModal(this.app, `Status: ${folder.path}`, out || "clean").open();
+      const out = await this.git(dir, `status --short --branch`);
+      new InfoModal(this.app, `Status: ${folder.path}`, out.stdout || "clean").open();
     } catch (e) {
       errorNotice("status failed", e);
     }
@@ -466,29 +554,28 @@ export default class FolgitPlugin extends Plugin {
 
   async clone(url: string, relFolder: string) {
     const rel = normalizePath(relFolder);
-    const parts = rel.split("/").filter(Boolean);
-    if (parts.length === 0) {
-      new Notice("Folgit: invalid target folder.");
-      return;
-    }
-    const parent = parts.slice(0, -1).join("/");
-    const adapter = this.adapter();
+    const targetAbs = path.join(this.vaultRoot(), rel);
+    const parentAbs = path.dirname(targetAbs);
+    const name = path.basename(targetAbs);
 
     try {
-      if (await adapter.exists(rel)) {
+      await fs.mkdir(parentAbs, { recursive: true });
+      try {
+        await fs.access(targetAbs);
         new Notice(`Folder '${rel}' already exists. Pick a different target.`);
         return;
+      } catch {
+        // does not exist, good
       }
-      if (parent) await mkdirVault(adapter, parent);
-      await adapter.mkdir(rel);
-      const depth = Math.max(0, Math.floor(this.settings.cloneDepth || 0));
-      new Notice(
-        depth > 0
-          ? `Cloning into '${rel}' (shallow, depth ${depth})…`
-          : `Cloning into '${rel}' (full history)…`
-      );
-      await this.git.clone(rel, url, { depth: depth > 0 ? depth : undefined });
+      new Notice(`Cloning into '${rel}'…`);
+      await this.git(parentAbs, `clone ${quote(url)} ${quote(name)}`);
+      await this.ensureIdentity(targetAbs);
       new Notice(`Cloned '${rel}'.`);
+      // refresh Obsidian's view of the vault
+      // @ts-ignore private but widely used
+      if (typeof this.app.vault.adapter?.reconcileDeletion === "function") {
+        // no-op; Obsidian auto-detects in most cases
+      }
     } catch (e) {
       errorNotice("clone failed", e);
     }
@@ -560,12 +647,6 @@ export default class FolgitPlugin extends Plugin {
   }
 
   async authorizeDrive(): Promise<void> {
-    if (!Platform.isDesktop) {
-      new Notice(
-        "Folgit: Google Drive authorization only works on desktop for now. Authorize on desktop; the token syncs via your vault."
-      );
-      return;
-    }
     const { driveClientId, driveClientSecret } = this.settings;
     if (!driveClientId || !driveClientSecret) {
       new Notice("Folgit: enter your OAuth client ID and secret first.");
@@ -629,7 +710,7 @@ export default class FolgitPlugin extends Plugin {
         new Notice(`Uploading '${m.path}' → Google Drive…`);
         const segments = m.path.split("/").filter(Boolean);
         const targetId = await this.ensureDrivePath(client, driveRootId, segments);
-        await this.uploadTree(client, m, targetId, totals);
+        await this.uploadTree(client, this.absPath(m), targetId, totals);
       }
       new Notice(
         `Uploaded ${totals.uploaded} file(s), ${totals.skipped} unchanged, across ${medias.length} '${name}' folder(s).`
@@ -661,13 +742,13 @@ export default class FolgitPlugin extends Plugin {
         return;
       }
       const totals = { downloaded: 0, skipped: 0 };
-      const base = root.path;
+      const base = this.absPath(root);
       for (const m of found) {
-        const localPath = [base, ...m.segments].filter(Boolean).join("/");
-        await mkdirVault(this.adapter(), localPath);
-        const displayPath = localPath || "/";
+        const localDir = path.join(base, ...m.segments);
+        await fs.mkdir(localDir, { recursive: true });
+        const displayPath = [root.path, ...m.segments].filter(Boolean).join("/");
         new Notice(`Downloading Drive → '${displayPath}'…`);
-        await this.downloadTree(client, m.driveId, localPath, totals);
+        await this.downloadTree(client, m.driveId, localDir, totals);
       }
       new Notice(
         `Downloaded ${totals.downloaded} file(s), ${totals.skipped} unchanged, across ${found.length} '${name}' folder(s).`
@@ -709,40 +790,42 @@ export default class FolgitPlugin extends Plugin {
 
   private async uploadTree(
     client: DriveClient,
-    localFolder: TFolder,
+    localDir: string,
     driveParentId: string,
     counts: { uploaded: number; skipped: number; folders: number }
   ): Promise<void> {
+    const entries = await fs.readdir(localDir, { withFileTypes: true });
     const remote = await client.listChildren(driveParentId);
     const remoteByName = new Map<string, DriveFile>();
     for (const r of remote) remoteByName.set(r.name, r);
 
-    for (const child of localFolder.children) {
-      if (child.name === ".DS_Store" || child.name === "Thumbs.db") continue;
-      const existing = remoteByName.get(child.name);
-      if (child instanceof TFolder) {
+    for (const entry of entries) {
+      if (entry.name === ".DS_Store" || entry.name === "Thumbs.db") continue;
+      const abs = path.join(localDir, entry.name);
+      const existing = remoteByName.get(entry.name);
+      if (entry.isDirectory()) {
         const subId =
           existing && existing.mimeType === FOLDER_MIME
             ? existing.id
-            : (await client.createFolder(child.name, driveParentId)).id;
+            : (await client.createFolder(entry.name, driveParentId)).id;
         if (!existing) counts.folders++;
-        await this.uploadTree(client, child, subId, counts);
-      } else if (child instanceof TFile) {
-        const size = child.stat.size;
+        await this.uploadTree(client, abs, subId, counts);
+      } else if (entry.isFile()) {
+        const stat = await fs.stat(abs);
         if (
           existing &&
           existing.mimeType !== FOLDER_MIME &&
-          existing.size === String(size)
+          existing.size === String(stat.size)
         ) {
           counts.skipped++;
           continue;
         }
-        const bytes = await this.adapter().readBinary(child.path);
+        const bytes = await fs.readFile(abs);
         await client.uploadFile(
-          child.name,
+          entry.name,
           driveParentId,
-          new Uint8Array(bytes),
-          guessMime(child.name),
+          new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+          guessMime(entry.name),
           existing && existing.mimeType !== FOLDER_MIME ? existing.id : undefined
         );
         counts.uploaded++;
@@ -756,25 +839,22 @@ export default class FolgitPlugin extends Plugin {
     localDir: string,
     counts: { downloaded: number; skipped: number }
   ): Promise<void> {
-    const adapter = this.adapter();
-    await mkdirVault(adapter, localDir);
+    await fs.mkdir(localDir, { recursive: true });
     const remote = await client.listChildren(driveParentId);
     for (const r of remote) {
-      const childPath = localDir ? `${localDir}/${r.name}` : r.name;
+      const abs = path.join(localDir, r.name);
       if (r.mimeType === FOLDER_MIME) {
-        await this.downloadTree(client, r.id, childPath, counts);
+        await this.downloadTree(client, r.id, abs, counts);
         continue;
       }
       if (r.mimeType.startsWith("application/vnd.google-apps")) continue;
-      if (await adapter.exists(childPath)) {
-        const st = await adapter.stat(childPath);
-        if (st && r.size !== undefined && st.size === Number(r.size)) {
-          counts.skipped++;
-          continue;
-        }
+      const existing = await fs.stat(abs).catch(() => null);
+      if (existing && r.size !== undefined && existing.size === Number(r.size)) {
+        counts.skipped++;
+        continue;
       }
       const buf = await client.downloadFile(r.id);
-      await adapter.writeBinary(childPath, buf);
+      await fs.writeFile(abs, new Uint8Array(buf));
       counts.downloaded++;
     }
   }
@@ -793,7 +873,7 @@ export default class FolgitPlugin extends Plugin {
 
   pickRepoFolder(title: string, onPick: (folder: TFolder) => void) {
     this.pickFolder(title, async (f) => {
-      if (!(await this.git.isRepo(f.path))) {
+      if (!(await this.isRepo(f))) {
         new Notice(`'${f.path}' is not a Git repo.`);
         return;
       }
@@ -802,17 +882,14 @@ export default class FolgitPlugin extends Plugin {
   }
 }
 
-async function mkdirVault(adapter: DataAdapter, path: string): Promise<void> {
-  if (!path) return;
-  if (await adapter.exists(path)) return;
-  const parts = path.split("/").filter(Boolean);
-  let accum = "";
-  for (const p of parts) {
-    accum = accum ? `${accum}/${p}` : p;
-    if (!(await adapter.exists(accum))) {
-      await adapter.mkdir(accum);
-    }
-  }
+function quote(s: string): string {
+  if (/^[A-Za-z0-9_\-./:=@]+$/.test(s)) return s;
+  return `"${s.replace(/(["\\$`])/g, "\\$1")}"`;
+}
+
+function summarize(r: GitResult): string {
+  const text = (r.stderr || r.stdout || "").split("\n").filter(Boolean).slice(-2).join(" · ");
+  return text || "ok";
 }
 
 function timestamp(): string {
@@ -858,12 +935,7 @@ function guessMime(name: string): string {
 }
 
 function errorNotice(prefix: string, e: unknown) {
-  const raw = e instanceof Error ? e.message : String(e);
-  // isomorphic-git can surface very large error payloads (pack dumps, object
-  // bodies); clipping keeps Obsidian Mobile's WebView happy and the Notice
-  // readable. Full error still goes to the console for debugging.
-  const msg = raw.length > 400 ? raw.slice(0, 400) + "…" : raw;
-  console.error(`[folgit] ${prefix}`, e);
+  const msg = e instanceof Error ? e.message : String(e);
   new Notice(`Folgit: ${prefix} — ${msg}`, 8000);
 }
 
@@ -957,6 +1029,19 @@ class FolgitSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
+      .setName("Git executable")
+      .setDesc("Path to the git binary. 'git' uses PATH.")
+      .addText((t) =>
+        t
+          .setPlaceholder("git")
+          .setValue(this.plugin.settings.gitPath)
+          .onChange(async (v) => {
+            this.plugin.settings.gitPath = v || "git";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Default branch")
       .setDesc("Used when initializing a new repo.")
       .addText((t) =>
@@ -995,7 +1080,7 @@ class FolgitSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Author name")
-      .setDesc("Used as the committer name for commits Folgit creates.")
+      .setDesc("Optional. Applied as local git config on repos Folgit touches.")
       .addText((t) =>
         t.setValue(this.plugin.settings.authorName).onChange(async (v) => {
           this.plugin.settings.authorName = v;
@@ -1015,7 +1100,7 @@ class FolgitSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "GitHub" });
     const ghHint = containerEl.createEl("p", { cls: "setting-item-description" });
     ghHint.appendText(
-      "Personal access token used for HTTPS operations against github.com. Create one at github.com/settings/tokens (fine-grained: grant 'Contents: read/write' on the target repos). Stored in this vault's plugin data."
+      "Personal access token used for HTTPS operations against github.com. Create one at github.com/settings/tokens (fine-grained: grant 'Contents: read/write' on the target repos). Stored in this vault's plugin data. Leave blank to fall back to your system git credential helper."
     );
 
     new Setting(containerEl)
@@ -1030,26 +1115,10 @@ class FolgitSettingTab extends PluginSettingTab {
           });
       });
 
-    new Setting(containerEl)
-      .setName("Clone depth")
-      .setDesc(
-        "How many recent commits to fetch when cloning. 1 = latest commit only (shallow — fastest, uses the least memory, recommended on mobile where large repos can OOM). 0 = full history (desktop only). Subsequent pulls add new commits on top."
-      )
-      .addText((t) =>
-        t
-          .setPlaceholder("1")
-          .setValue(String(this.plugin.settings.cloneDepth))
-          .onChange(async (v) => {
-            const n = parseInt(v, 10);
-            this.plugin.settings.cloneDepth = isNaN(n) || n < 0 ? 1 : n;
-            await this.plugin.saveSettings();
-          })
-      );
-
     containerEl.createEl("h3", { text: "Google Drive (media folder)" });
     const howto = containerEl.createEl("p", { cls: "setting-item-description" });
     howto.appendText(
-      "Create an OAuth 2.0 Client ID of type 'Desktop app' in Google Cloud Console, enable the Drive API, then paste the client ID and secret below and click Authorize. Folgit uses the drive.file scope — it only sees files it creates. Authorization runs on desktop only; once authorized the token is stored in the vault and reused on mobile."
+      "Create an OAuth 2.0 Client ID of type 'Desktop app' in Google Cloud Console, enable the Drive API, then paste the client ID and secret below and click Authorize. Folgit uses the drive.file scope — it only sees files it creates."
     );
 
     new Setting(containerEl)

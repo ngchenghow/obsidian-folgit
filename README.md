@@ -2,18 +2,19 @@
 
 Per-folder Git for Obsidian, plus native Google Drive sync for a designated media folder. Clone, commit, push, pull — or upload/download binaries to Drive — without leaving Obsidian.
 
-Works on desktop **and mobile**. Git is spoken directly via [isomorphic-git](https://isomorphic-git.org/) over Obsidian's `requestUrl` (no system `git` needed). Google Drive uses the Drive REST API with OAuth 2.0 — authorization runs on desktop once, then the token syncs via the vault to mobile.
+Desktop only. Uses your system `git`. Google Drive is spoken directly via the Drive REST API with OAuth 2.0.
 
 ## Features
 
 ### Git (any folder)
-- **Init folder as Git repo** — turn any vault folder into a repo.
+- **Init folder as Git repo** — run `git init` on any vault folder.
 - **Clone GitHub repo into a new folder** — drop a GitHub URL, get a working folder in your vault.
 - **Add / update remote** — set `origin` on a folder.
 - **Commit** — stages all changes in the folder and commits with a message.
-- **Push** — pushes the current branch to `origin`.
+- **Push** — fetches `origin/<branch>` and auto-merges any new commits, then pushes. Safe across multiple devices.
+- **Force push** — `git push --force`, no fetch/merge. Overwrites the remote ref.
 - **Pull** — fast-forward pull from `origin`.
-- **Status** — porcelain-style status in a modal.
+- **Status** — porcelain status in a modal.
 - **Right-click folders** — the commands show up in the folder context menu.
 
 ### Google Drive (media folders only)
@@ -28,11 +29,10 @@ Drive sync is intended for large binaries (images, audio, video) that you don't 
 ## Settings
 
 **Git**
+- Git executable path (defaults to `git` on PATH)
 - Default branch (for `init`)
 - Default commit message
-- Commit name (prepended to Sync push auto-commit messages — e.g. `laptop: Auto-sync …`)
-- Author name / email (used as the committer for commits Folgit creates)
-- GitHub token (personal access token for HTTPS auth against github.com)
+- Author name / email (applied as local `git config` on repos Folgit touches)
 
 **Google Drive**
 - Media folder name — folder basename to sync (default `media`); every folder with this name gets synced, regardless of depth
@@ -45,17 +45,10 @@ Drive sync is intended for large binaries (images, audio, video) that you don't 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create or select a project.
 2. Enable the **Google Drive API** under APIs & Services.
 3. Under *APIs & Services → Credentials*, create an **OAuth 2.0 Client ID** of type **Desktop app**. Copy the client ID and client secret.
-4. In Folgit settings **on desktop**, paste the client ID and secret, set *Media folder*, and click **Authorize**. A browser window opens for Google consent; the plugin captures the code on a loopback port.
-5. Tokens are stored in `<vault>/.obsidian/plugins/obsidian-folgit/data.json`. If your vault syncs across devices, mobile will pick the token up automatically.
-6. Use *Upload media folder to Google Drive* / *Download media folder from Google Drive*, or right-click the media folder — on either desktop or mobile.
+4. In Folgit settings, paste the client ID and secret, set *Media folder*, and click **Authorize**. A browser window opens for Google consent; the plugin captures the code on a loopback port.
+5. Use *Upload media folder to Google Drive* / *Download media folder from Google Drive*, or right-click the media folder.
 
-Click **Sign out** to revoke locally and clear the stored tokens.
-
-## Authentication
-
-**GitHub:** set a personal access token in Folgit's settings (fine-grained tokens with *Contents: read/write* on the target repos work great). The token is applied to clones, pushes, and pulls automatically. Folgit does not shell out to `git` and has no access to system credential helpers.
-
-**Google Drive:** OAuth 2.0 (desktop loopback flow). Authorize once on desktop; the refresh token is stored in the vault's plugin data and reused everywhere the vault syncs.
+Tokens are stored in `<vault>/.obsidian/plugins/obsidian-folgit/data.json`. Click **Sign out** to revoke locally and clear them.
 
 ## Install (manual)
 
@@ -63,6 +56,10 @@ Click **Sign out** to revoke locally and clear the stored tokens.
 2. `npm run build`
 3. Copy `manifest.json` and the built `main.js` into `<your-vault>/.obsidian/plugins/obsidian-folgit/`.
 4. Enable **Folgit** in Obsidian's Community plugins settings.
+
+## Authentication
+
+Folgit shells out to your system `git`, so it uses whatever credentials your local `git` is configured with — a credential helper (Git Credential Manager, osxkeychain, `gh auth`), SSH keys, or a cached HTTPS token. Configure those the way you normally would.
 
 ## License
 
